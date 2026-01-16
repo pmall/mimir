@@ -15,25 +15,41 @@ class AminoAcidTokenizer:
         bos_idx (int): Index for the Beginning Of Sequence token.
         eos_idx (int): Index for the End Of Sequence token.
     """
-    def __init__(self):
+
+    def __init__(self, targets: List[str] = None):
         self.tokenizer = EsmSequenceTokenizer()
         self.pad_idx = self.tokenizer.pad_token_id
         self.bos_idx = self.tokenizer.bos_token_id
         self.eos_idx = self.tokenizer.eos_token_id
+        
+        # Standard vocab size
+        self.base_vocab_size = self.tokenizer.vocab_size
+        
+        # Target tokens
+        self.target_to_id = {}
+        self.id_to_target = {}
+        
+        if targets:
+            # Sort for deterministic ID assignment
+            for i, target in enumerate(sorted(set(targets))):
+                # Assign IDs starting after base vocab
+                token_id = self.base_vocab_size + i
+                self.target_to_id[target] = token_id
+                self.id_to_target[token_id] = target
+                
+    @property
+    def vocab_size(self) -> int:
+        return self.base_vocab_size + len(self.target_to_id)
+
+    def get_target_id(self, target: str) -> int:
+        if target not in self.target_to_id:
+            raise ValueError(f"Unknown target: {target}")
+        return self.target_to_id[target]
 
     def encode(self, sequence: str, max_length: int = None) -> List[int]:
         """
         Encode a sequence into token IDs.
         Includes BOS and EOS tokens automatically by the underlying tokenizer.
-        
-        Args:
-            sequence: The amino acid sequence string (e.g., "MKAIL").
-            max_length: Optional maximum length. If provided:
-                        - Truncates longer sequences.
-                        - Pads shorter sequences with pad_idx.
-        
-        Returns:
-            List[int]: A list of token IDs.
         """
         # EsmSequenceTokenizer.encode adds BOS and EOS by default?
         # Based on explore output: [0, 20, ..., 2]. 0 is likely BOS, 2 is EOS.
@@ -43,13 +59,9 @@ class AminoAcidTokenizer:
             return ids
             
         if len(ids) > max_length:
-            # Truncate but keep EOS if possible?
-            # Standard: truncate to max_length - 1 and append EOS?
-            # Or just strict truncation.
-            # Let's simple truncate for now.
-             ids = ids[:max_length]
-             # Ensure last token is EOS if it was cut off? 
-             # For peptides 4-20 length, max_length is usually adequate.
+            # Simple truncation. 
+            # Ideally we keep valid tokens.
+            ids = ids[:max_length]
         
         if len(ids) < max_length:
             ids = ids + [self.pad_idx] * (max_length - len(ids))
@@ -57,4 +69,7 @@ class AminoAcidTokenizer:
         return ids
 
     def decode(self, tokens: List[int]) -> str:
-        return self.tokenizer.decode(tokens)
+        # Handle custom tokens if present in the list?
+        # For now, filter them out before decoding with base tokenizer, or handle errors.
+        base_tokens = [t for t in tokens if t < self.base_vocab_size]
+        return self.tokenizer.decode(base_tokens)

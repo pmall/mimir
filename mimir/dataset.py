@@ -85,6 +85,7 @@ class PeptideDataset(Dataset):
         - target_id: Integer ID of target protein (-1 if no target)
     """
 
+
     def __init__(
         self,
         dataset_path: str | Path,
@@ -102,24 +103,19 @@ class PeptideDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.samples = []
-        self.target_to_id = {}
+        
+        # We no longer build target_to_id here. 
+        # The tokenizer must already be initialized with all targets.
 
         with open(dataset_path) as f:
             reader = csv.DictReader(f)
             for row in reader:
-                target = row["target"]
-                if target and target not in self.target_to_id:
-                    self.target_to_id[target] = len(self.target_to_id)
-
                 self.samples.append(
                     {
                         "sequence": row["sequence"],
-                        "target": target,
+                        "target": row["target"],
                     }
                 )
-
-        self.id_to_target = {v: k for k, v in self.target_to_id.items()}
-        self.num_targets = len(self.target_to_id)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -127,13 +123,36 @@ class PeptideDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         sample = self.samples[idx]
         sequence = sample["sequence"]
+        target = sample["target"]
+        
+        # Get target ID from tokenizer
+        try:
+            target_id = self.tokenizer.get_target_id(target)
+        except ValueError:
+            # Fallback or error? For now error desirable to catch issues.
+            # But during training we expect all targets to be known.
+            # If generating new data, maybe -1?
+            target_id = -1 
 
-        tokens = self.tokenizer.encode(sequence, self.max_length)
-
+        # Encode sequence (BOS...EOS)
+        # We reserve 1 slot for target token
+        seq_tokens = self.tokenizer.encode(sequence, self.max_length - 1)
+        
+        # Prepend target token
+        # [TARGET] [BOS] ... [EOS]
+        tokens = [target_id] + seq_tokens
+        
+        # Adjust length to match tensor size if needed? 
+        # Tokenizer might have padded `seq_tokens`.
+        # If padded, we have `[TARGET] [BOS] ... [EOS] [PAD] [PAD]`.
+        # length is seq_len + 1.
+        
+        # BUT: tokenizer.encode returns list.
+        # We need to handle truncation/padding consistent with `max_length`.
+        # If tokenizer.encode padded to max_length-1, then adding 1 makes max_length.
+        
         return {
             "tokens": torch.tensor(tokens, dtype=torch.long),
-            "length": torch.tensor(len(sequence), dtype=torch.long),
-            "target_id": torch.tensor(
-                self.target_to_id.get(sample["target"], -1), dtype=torch.long
-            ),
+            "length": torch.tensor(len(tokens), dtype=torch.long), # Actual length including target
+            "target_id": torch.tensor(target_id, dtype=torch.long),
         }
