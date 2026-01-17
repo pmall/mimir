@@ -37,8 +37,9 @@ We implement this strategy using a **Masked Language Modeling (MLM)** objective,
 
 2.  **Masking Strategy**:
 
-    - We apply **random masking (15%)** to the peptide sequence.
-    - **Smart Masking**: We ensure that even short sequences (e.g., 4 amino acids) have at least one mask.
+    - We apply **variable random masking (15% - 50%)** to sequence tokens.
+    - **Why?** Uniform 15% masking provides insufficient training signal across all sequence lengths for this generative task. Variable higher masking forces the model to reconstruct larger portions of the structure and learn more robust internal representations.
+    - **Smart Masking**: We ensure at least one mask is always applied.
     - **Crucial**: The `TARGET_ID` is **never masked**. It is always visible to condition the repair process.
 
 3.  **Training Objective**:
