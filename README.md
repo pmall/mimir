@@ -53,16 +53,18 @@ We implement this strategy using a **Masked Language Modeling (MLM)** objective,
 
 ## Directory Structure
 
+- **`data/`**: Ignored directory where generated datasets are stored.
 - **`mimir/`**: Core package containing dataset and tokenizer logic.
   - `dataset.py`: PyTorch Dataset implementation with dynamic padding.
+  - `model_utils.py`: Utilities for resizing ESM-3 embeddings.
   - `tokenizer.py`: Wrapper around ESM-3 tokenizer.
-- **`setup_esm3.sh`**: Environment setup, authentication, and weight download.
 - **`scripts/`**: Executable scripts for data generation and training.
-  - `generate_dataset.py`: Extracts interacting peptide pairs from the PostgreSQL database.
-  - `train.py`: Fine-tunes ESM-3 using LoRA.
   - `download_weights.py`: Triggers model weight download via `esm` library.
+  - `estimate_training.py`: Calculates sample complexity and estimates training time.
+  - `generate_dataset.py`: Extracts interacting peptide pairs from the PostgreSQL database.
   - `test_esm3.py`: Validates installation by running a simple generation task.
-- **`data/`**: Ignored directory where generated datasets are stored.
+  - `train.py`: Fine-tunes ESM-3 using LoRA.
+- **`setup_esm3.sh`**: Environment setup, authentication, and weight download.
 
 ## Setup
 
@@ -99,5 +101,20 @@ uv run python scripts/generate_dataset.py --verbose
 Train the model using LoRA.
 
 ```bash
-uv run python scripts/train.py --epochs 10 --batch_size 4
+uv run scripts/train.py --epochs 500 --batch_size 4
 ```
+
+### 3. Estimate Training Resources
+
+We provide a script to estimate the combinatorial complexity and training time based on your dataset statistics and masking strategy.
+
+```bash
+uv run scripts/estimate_training.py
+```
+
+**Estimated Training Times (500 Epochs):**
+
+- **Google Colab (T4 GPU)**: ~3.5 hours
+- **Google Colab (H100 GPU)**: ~25 minutes
+
+_Note: 500 epochs provide robust coverage for short peptides while randomly sampling the massive combinatorial space of longer sequences._
