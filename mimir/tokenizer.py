@@ -1,5 +1,5 @@
 
-from typing import List
+from typing import List, Optional
 from esm.tokenization import EsmSequenceTokenizer
 
 class AminoAcidTokenizer:
@@ -16,7 +16,7 @@ class AminoAcidTokenizer:
         eos_idx (int): Index for the End Of Sequence token.
     """
 
-    def __init__(self, targets: List[str] = None):
+    def __init__(self, targets: Optional[List[str]] = None):
         self.tokenizer = EsmSequenceTokenizer()
         self.pad_idx = self.tokenizer.pad_token_id
         self.bos_idx = self.tokenizer.bos_token_id

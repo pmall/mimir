@@ -4,8 +4,7 @@ import argparse
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import peft
-from peft import get_peft_model, LoraConfig, TaskType
+from peft import get_peft_model, LoraConfig
 
 from mimir.dataset import PeptideDataset, create_dynamic_collate_fn
 from mimir.tokenizer import AminoAcidTokenizer
@@ -180,6 +179,7 @@ def train(args):
         
         # Save checkpoint periodically
         save_path = f"checkpoints/epoch_{epoch}"
+        os.makedirs(save_path, exist_ok=True)
         model.save_pretrained(save_path)
         print(f"Saved checkpoint to {save_path}")
 if __name__ == "__main__":

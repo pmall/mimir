@@ -50,13 +50,17 @@ def create_dynamic_collate_fn(pad_idx: int, mask_idx: int) -> Callable:
         """
         # 1. Stack and Pad
         # ----------------
-        # Determine maximum length in this batch for efficient padding
-        lengths = torch.stack([item["length"] for item in batch])  # [Batch]
+        # Extract tokens and lengths
+        tokens_list = [item["tokens"] for item in batch]
+        lengths = torch.stack([item["length"] for item in batch])
         max_len = lengths.max().item()
         
-        # Stack tokens and trim to max_len (since they might be padded to global max)
-        # Note: 'tokens' here contains [Target, BOS, Sequence..., EOS, Pad...]
-        batch_tokens = torch.stack([item["tokens"][:max_len] for item in batch]) # [B, L_max]
+        # Pad sequences to the max length in this batch
+        from torch.nn.utils.rnn import pad_sequence
+        batch_tokens = pad_sequence(tokens_list, batch_first=True, padding_value=pad_idx)
+        
+        # Warning: pad_sequence pads to the longest in batch, which matches max_len
+        # (Assuming no truncation happened before that violated max_length constraint relative to batch)
         
         # 2. Create Masks
         # ---------------
@@ -197,23 +201,22 @@ class PeptideDataset(Dataset):
             # If generating new data, maybe -1?
             target_id = -1 
 
-        # Encode sequence (BOS...EOS)
-        # We reserve 1 slot for target token
-        seq_tokens = self.tokenizer.encode(sequence, self.max_length - 1)
+        # Encode sequence (BOS...EOS) WITHOUT padding
+        # We need raw IDs to calculate length correctly
+        seq_tokens = self.tokenizer.encode(sequence, max_length=None)
         
         # Prepend target token
         # [TARGET] [BOS] ... [EOS]
         tokens = [target_id] + seq_tokens
         
-        # Adjust length to match tensor size if needed? 
-        # Tokenizer might have padded `seq_tokens`.
-        # If padded, we have `[TARGET] [BOS] ... [EOS] [PAD] [PAD]`.
-        # length is seq_len + 1.
-        
-        # BUT: tokenizer.encode returns list.
-        # We need to handle truncation/padding consistent with `max_length`.
-        # If tokenizer.encode padded to max_length-1, then adding 1 makes max_length.
-        
+        # Handle Truncation if exceeding max_length
+        if len(tokens) > self.max_length:
+            # We must truncate. Ideally we keep EOS. 
+            # Current naive strategy: just simple slice, EOS likely lost if sequence is long.
+            # Ideally: tokens = tokens[:self.max_length-1] + [tokens[-1]] if tokens[-1] is EOS?
+            # For strictness:
+            tokens = tokens[:self.max_length]
+            
         return {
             "tokens": torch.tensor(tokens, dtype=torch.long),
             "length": torch.tensor(len(tokens), dtype=torch.long), # Actual length including target
