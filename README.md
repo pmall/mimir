@@ -26,6 +26,30 @@ We use **LoRA (Low-Rank Adaptation)** to fine-tune the model. Instead of rewriti
 
 In essence, we are taking a "Universe Simulator" of proteins and tweaking its settings so that its "Create Protein" button defaults to "Create Peptide Binder" for your specific target.
 
+### 4. Implementation Details
+
+We implement this strategy using a **Masked Language Modeling (MLM)** objective, similar to how BERT is trained, but adapted for generative purpose:
+
+1.  **Target Conditioning**:
+
+    - Every training sample is prepended with its target ID: `[TARGET_ID] [BOS] [SEQUENCE...] [EOS]`
+    - This creates a strong association: The model learns that _this_ specific ID implies _this_ style of sequence.
+
+2.  **Masking Strategy**:
+
+    - We apply **random masking (15%)** to the peptide sequence.
+    - **Smart Masking**: We ensure that even short sequences (e.g., 4 amino acids) have at least one mask.
+    - **Crucial**: The `TARGET_ID` is **never masked**. It is always visible to condition the repair process.
+
+3.  **Training Objective**:
+
+    - The model predicts the missing amino acids based on the visible ones AND the target ID.
+    - Loss is calculated _only_ on the masked positions, normalized by the number of masks.
+
+4.  **Technical Nuances**:
+    - **Embedding Resizing**: Since ESM-3 uses a fixed vocabulary, we manually resize the embedding layers to accommodate our new target tokens.
+    - **LoRA Targets**: We fine-tune specific attention modules (`layernorm_qkv` and `out_proj`) to efficiently adapt the model's "grammar" to our specific "dialect" of binders.
+
 ## Directory Structure
 
 - **`mimir/`**: Core package containing dataset and tokenizer logic.

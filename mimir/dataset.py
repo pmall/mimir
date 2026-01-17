@@ -18,58 +18,118 @@ from torch.utils.data import Dataset
 from .tokenizer import AminoAcidTokenizer
 
 
-def create_dynamic_collate_fn(pad_idx: int = 0) -> Callable:
+def create_dynamic_collate_fn(pad_idx: int, mask_idx: int) -> Callable:
     """
-    Create a collate function that pads sequences dynamically to batch-max length.
+    Create a collate function that handles dynamic padding AND masked language modeling (MLM).
     
-    Dynamic padding significantly improves training efficiency by checking
-    the longest sequence in *encoded* batch and only padding to that length,
-    rather than a global maximum.
+    This function prepares batches for BERT-style training:
+    1.  **Dynamic Padding**: Pads all sequences to the length of the longest sequence in the batch.
+    2.  **Masking**: randomly masks ~15% of the *sequence* tokens (not targets/specials).
+    3.  **Label Creation**: Creates labels for loss calculation, ignoring unmasked tokens.
     
     Args:
-        pad_idx: The token index for PAD (default 0, matching tokenizer.pad_idx).
-                 This is used to construct the 'pad_mask'.
+        pad_idx (int): The token index for PAD.
+        mask_idx (int): The token index for MASK (used to replace input tokens).
     
     Returns:
         A collate_fn compatible with torch.utils.data.DataLoader
     """
     def dynamic_collate_fn(batch: list[dict]) -> dict:
         """
-        Collate samples with dynamic padding to the longest sequence in batch.
+        Collates samples into a batch with MLM masking.
         
-        Process:
-        1. stack lengths of all items in batch.
-        2. find max_len in this batch.
-        3. trim all 'tokens' tensors to max_len.
-        4. create a padding mask.
-        
-        Input batch items have:
-            - tokens: [max_length] pre-padded to global max (20).
-            - length: scalar, actual sequence length.
-            - target_id: scalar, target protein index or -1.
-        
-        Output dict has:
-            - tokens: [batch, L_max] trimmed to batch-max length.
-            - length: [batch] original lengths.
-            - target_id: [batch] target protein indices.
-            - pad_mask: [batch, L_max] boolean mask, True = PAD position.
+        Input Schema (per item):
+            - tokens: Tensor[Long] of shape (L_seq) - [Target, BOS, seq..., EOS, Pad...]
+            - length: int - Valid user specified length
+            - target_id: int - The prepended target token
+            
+        Output Schema (Batched):
+            - tokens: [Batch, L_max] - Masked inputs
+            - labels: [Batch, L_max] - Ground truth for masked positions (-100 elsewhere)
+            - pad_mask: [Batch, L_max] - True where padded
         """
-        # Extract lengths and find batch maximum
-        lengths = torch.stack([item["length"] for item in batch])  # [batch]
+        # 1. Stack and Pad
+        # ----------------
+        # Determine maximum length in this batch for efficient padding
+        lengths = torch.stack([item["length"] for item in batch])  # [Batch]
         max_len = lengths.max().item()
         
-        # Trim tokens to L_max (they were pre-padded to 20)
-        tokens = torch.stack([item["tokens"][:max_len] for item in batch])  # [batch, L_max]
+        # Stack tokens and trim to max_len (since they might be padded to global max)
+        # Note: 'tokens' here contains [Target, BOS, Sequence..., EOS, Pad...]
+        batch_tokens = torch.stack([item["tokens"][:max_len] for item in batch]) # [B, L_max]
         
-        # Build padding mask for attention: True where position >= actual length
-        positions = torch.arange(max_len).unsqueeze(0)  # [1, L_max]
-        pad_mask = positions >= lengths.unsqueeze(1)    # [batch, L_max] broadcast
+        # 2. Create Masks
+        # ---------------
+        # We need two masks:
+        # a) padding_mask: to ignore padding in attention (and loss)
+        # b) mlm_mask: to select which tokens to mask for prediction
         
+        # Create position grid [1, L_max]
+        positions = torch.arange(max_len, device=batch_tokens.device).unsqueeze(0)
+        
+        # Padding Mask: True where position >= actual length
+        # Used by attention mechanism to ignore pads
+        pad_mask = positions >= lengths.unsqueeze(1) 
+        
+        # 3. Apply BERT-style Masking
+        # ---------------------------
+        # We assume structure: [Target (0), BOS (1), Seq_Start (2) ... Seq_End (Len-2), EOS (Len-1)]
+        # We ONLY want to mask the actual Sequence tokens.
+        
+        # Create a copy for labels (ground truth)
+        labels = batch_tokens.clone()
+        
+        # Initialize inputs as a copy of ground truth (we will overwrite some with <mask,>)
+        inputs = batch_tokens.clone()
+        
+        # Iterate over each sequence in the batch to apply random masking
+        # Vectorizing this fully is complex due to variable lengths, so we loop over batch (B is small ~32-64)
+        batch_size = batch_tokens.size(0)
+        
+        for i in range(batch_size):
+            # Get valid length for this sequence
+            l = lengths[i].item()
+            
+            # Define valid range for masking:
+            # Start: 2 (Skip Target @ 0 and BOS @ 1)
+            # End: l - 1 (Skip EOS @ l-1)
+            # Example: [T, BOS, A, B, C, EOS] (len=6) -> valid indices [2, 3, 4] (A, B, C)
+            valid_start = 2
+            valid_end = l - 1
+            
+            if valid_end <= valid_start:
+                # Sequence too short to have maskable tokens (e.g., just special tokens)
+                # Should not happen with valid peptides >= 4aa
+                labels[i] = -100 # Ignore whole sequence
+                continue
+                
+            # Calculate number of tokens to mask
+            # Constraint: Mask 15% but at least 1 token if possible
+            seq_len = valid_end - valid_start
+            num_mask = max(1, int(seq_len * 0.15))
+            
+            # Select random indices within the valid range
+            # torch.randperm returns random permutation of 0..seq_len-1
+            # We take first 'num_mask' and shift by 'valid_start'
+            mask_indices = torch.randperm(seq_len)[:num_mask] + valid_start
+            
+            # Apply Masking to INPUTS
+            inputs[i, mask_indices] = mask_idx
+            
+            # Set LABELS
+            # We want to calculate loss ONLY on mask_indices.
+            # So we set everything else to -100 (PyTorch CrossEntropy ignore_index)
+            # First, set the whole label row to -100
+            labels[i] = -100 
+            # Then restore the ground truth ONLY at mask_indices
+            labels[i, mask_indices] = batch_tokens[i, mask_indices]
+            
         return {
-            "tokens": tokens,
-            "length": lengths,
+            "tokens": inputs,      # Masked input tokens
+            "labels": labels,      # -100 everywhere except masked positions
+            "length": lengths,     # Original lengths
             "target_id": torch.stack([item["target_id"] for item in batch]),
-            "pad_mask": pad_mask,
+            "pad_mask": pad_mask,  # Attention mask
         }
     
     return dynamic_collate_fn

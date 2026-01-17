@@ -40,6 +40,11 @@ class AminoAcidTokenizer:
     @property
     def vocab_size(self) -> int:
         return self.base_vocab_size + len(self.target_to_id)
+        
+    @property
+    def mask_token_id(self) -> int:
+        """Expose the mask token ID from the underlying ESM tokenizer."""
+        return self.tokenizer.mask_token_id
 
     def get_target_id(self, target: str) -> int:
         if target not in self.target_to_id:
