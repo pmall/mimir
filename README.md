@@ -31,9 +31,12 @@ In essence, we are taking a "Universe Simulator" of proteins and tweaking its se
 - **`mimir/`**: Core package containing dataset and tokenizer logic.
   - `dataset.py`: PyTorch Dataset implementation with dynamic padding.
   - `tokenizer.py`: Wrapper around ESM-3 tokenizer.
+- **`setup_esm3.sh`**: Environment setup, authentication, and weight download.
 - **`scripts/`**: Executable scripts for data generation and training.
   - `generate_dataset.py`: Extracts interacting peptide pairs from the PostgreSQL database.
   - `train.py`: Fine-tunes ESM-3 using LoRA.
+  - `download_weights.py`: Triggers model weight download via `esm` library.
+  - `test_esm3.py`: Validates installation by running a simple generation task.
 - **`data/`**: Ignored directory where generated datasets are stored.
 
 ## Setup
