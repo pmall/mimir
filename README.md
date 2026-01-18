@@ -31,21 +31,22 @@ In essence, we are taking a "Universe Simulator" of proteins and tweaking its se
 We implement this strategy using a **Masked Language Modeling (MLM)** objective, similar to how BERT is trained, but adapted for generative purpose:
 
 1.  **Target Conditioning**:
-
     - Every training sample is prepended with its target ID: `[TARGET_ID] [BOS] [SEQUENCE...] [EOS]`
     - This creates a strong association: The model learns that _this_ specific ID implies _this_ style of sequence.
 
 2.  **Masking Strategy**:
-
     - We apply **variable random masking (15% - 50%)** to sequence tokens.
     - **Why?** Uniform 15% masking provides insufficient training signal across all sequence lengths for this generative task. Variable higher masking forces the model to reconstruct larger portions of the structure and learn more robust internal representations.
     - **Smart Masking**: We ensure at least one mask is always applied.
     - **Crucial**: The `TARGET_ID` is **never masked**. It is always visible to condition the repair process.
 
 3.  **Training Objective**:
-
     - The model predicts the missing amino acids based on the visible ones AND the target ID.
     - Loss is calculated _only_ on the masked positions, normalized by the number of masks.
+    - **Masking Boost**: We apply a **custom loss boost** to encourage the model to excel at "hard" examples (heavily masked sequences).
+      - Formula: Boost = 1.0 + k \* log(N_masks + 1)
+      - Where k is the `masking_boost_ratio` (default 0.5).
+      - This provides a gentle, logarithmic increase in gradient weight as the number of masks increases, prioritizing the generation of complete structures over simple single-token fixes.
 
 4.  **Technical Nuances**:
     - **Embedding Resizing**: Since ESM-3 uses a fixed vocabulary, we manually resize the embedding layers to accommodate our new target tokens.

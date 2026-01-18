@@ -121,11 +121,8 @@ def train(args):
     model.train()
     
     # Loss Function:
-    # We use CrossEntropyLoss with reduction='mean'.
-    # IMPORTANT: ignore_index=-100 ensures we only calculate loss on MASKED tokens.
-    # The 'mean' reduction then automatically divides by the number of valid (masked) tokens,
-    # satisfying the normalization requirement (Sum of Loss / N_masks).
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='mean')
+    # We use CrossEntropyLoss with reduction='none' to handle per-sample weighting.
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
 
     # 6. Training Execution
     # ---------------------
@@ -154,10 +151,36 @@ def train(args):
                 # Flatten logits and labels for CrossEntropy
                 # Logits: [B*L, Vocab]
                 # Labels: [B*L]
-                loss = criterion(
+                # We use reduction='none' to get per-token loss first
+                loss_per_token = criterion(
                     logits.view(-1, logits.size(-1)), 
                     labels.view(-1)
                 )
+                
+                # Reshape back to [Batch, Length]
+                loss_per_token = loss_per_token.view(tokens.size(0), tokens.size(1))
+                
+                # Vectorized Boost Calculation
+                # ----------------------------
+                # 1. Mask of valid tokens (where labels != -100)
+                mask = labels != -100 # [Batch, Length]
+                num_masked = mask.sum(dim=1).float() # [Batch]
+                
+                # 2. Calculate base sample loss (mean of masked tokens per sample)
+                # Avoid division by zero for samples with no masked tokens
+                sample_loss = (loss_per_token * mask.float()).sum(dim=1) / num_masked.clamp(min=1)
+                
+                # 3. Apply Boost (log-based on absolute masked count)
+                # Using log(num_masked + 1) for gentle scaling that favors more masks
+                boost = 1.0 + args.masking_boost_ratio * torch.log(num_masked + 1)
+                
+                # 4. Final Loss
+                # We average the boosted loss over valid samples (those with masked tokens)
+                valid_samples = num_masked > 0
+                if valid_samples.any():
+                    loss = (sample_loss * boost)[valid_samples].mean()
+                else:
+                    loss = torch.tensor(0.0, device=device, requires_grad=True)
                 
                 # Backward Pass
                 loss.backward()
@@ -191,6 +214,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora_r", type=int, default=8)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.1)
+    parser.add_argument("--masking_boost_ratio", type=float, default=0.5, help="Log boost factor for number of masked tokens")
     args = parser.parse_args()
     
     train(args)
