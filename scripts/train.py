@@ -150,6 +150,7 @@ def train(args):
     for epoch in range(args.epochs):
         print(f"Epoch {epoch+1}/{args.epochs}")
         total_loss = 0
+        total_true_loss = 0
         total_correct_masked = 0
         total_masked_tokens = 0
         total_perplexity = 0
@@ -250,6 +251,12 @@ def train(args):
                     total_correct_masked += correct.sum().item()
                     total_masked_tokens += num_masked.sum().item()
                     total_perplexity += perplexity.item()
+                    
+                    # Accumulate True Loss (Weighted by sample count or just sum? Just sum for avg)
+                    # We want the average true loss over the epoch.
+                    # sample_loss is [Batch] of mean loss per sample.
+                    # We can use sample_loss.mean() for the batch average.
+                    total_true_loss += sample_loss.mean().item()
 
                 # Update Progress Bar
                 pbar.set_postfix({
@@ -267,12 +274,14 @@ def train(args):
         
         if num_batches > 0:
             avg_loss = total_loss / num_batches
+            avg_true_loss = total_true_loss / num_batches
             avg_acc = total_correct_masked / max(1, total_masked_tokens)
             avg_ppl = total_perplexity / num_batches
             
             print("-" * 60)
             print(f"Epoch {epoch+1} Summary:")
-            print(f"  Avg Loss:       {avg_loss:.4f}")
+            print(f"  Avg Loss (Boosted): {avg_loss:.4f}")
+            print(f"  Avg Loss (True):    {avg_true_loss:.4f}")
             print(f"  Avg Perplexity: {avg_ppl:.4f}")
             print(f"  Masked Accuracy: {avg_acc:.2%}")
             print("-" * 60)
