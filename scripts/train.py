@@ -10,7 +10,13 @@ from mimir.dataset import PeptideDataset, create_dynamic_collate_fn
 from mimir.tokenizer import AminoAcidTokenizer
 from esm.models.esm3 import ESM3
 
-from mimir.model_utils import resize_esm3_tokens
+try:
+    from mimir.model_utils import resize_esm3_tokens
+except ImportError:
+    # Allow running without mimir installed if file is local
+    import sys
+    sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+    from mimir.model_utils import resize_esm3_tokens
 
 def train(args):
     """
@@ -68,7 +74,9 @@ def train(args):
         dataset, 
         batch_size=args.batch_size, 
         shuffle=True, 
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        num_workers=args.num_workers,
+        pin_memory=True if torch.cuda.is_available() else False
     )
 
     # 3. Model Initialization
@@ -117,7 +125,18 @@ def train(args):
 
     # 5. Training Loop Setup
     # ----------------------
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    # Optimizer Setup
+    # ---------------
+    if args.use_8bit_adam:
+        try:
+            import bitsandbytes as bnb
+            print("Using 8-bit AdamW optimizer via bitsandbytes...")
+            optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=args.lr)
+        except ImportError:
+            print("WARNING: bitsandbytes not found. Falling back to standard AdamW.")
+            optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     model.train()
     
     # Loss Function:
@@ -131,12 +150,13 @@ def train(args):
         total_loss = 0
         num_batches = 0
         
-        for batch in tqdm(dataloader):
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
+        for batch in pbar:
             # Move inputs to device
             tokens = batch["tokens"].to(device)   # Input: Masked sequences
             labels = batch["labels"].to(device)   # Target: Original IDs at masked pos, -100 otherwise
             
-            optimizer.zero_grad()
+            # Optimizer handling moved to accumulation step
             
             try:
                 # Forward Pass
@@ -186,12 +206,41 @@ def train(args):
                 else:
                     loss = torch.tensor(0.0, device=device, requires_grad=True)
                 
-                # Backward Pass
+                # Backward Pass & Gradient Accumulation
+                # -------------------------------------
+                # Normalize loss for accumulation
+                loss = loss / args.gradient_accumulation_steps
                 loss.backward()
-                optimizer.step()
                 
-                total_loss += loss.item()
+                if (num_batches + 1) % args.gradient_accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                
+                total_loss += loss.item() * args.gradient_accumulation_steps # Scale back for logging
                 num_batches += 1
+                
+                # Metrics Calculation for Logging
+                # -------------------------------
+                with torch.no_grad():
+                    # Calculate accuracy on masked tokens
+                    # logits: [Batch, Length, Vocab]
+                    # predictions: [Batch, Length]
+                    predictions = logits.argmax(dim=-1)
+                    
+                    # mask: [Batch, Length] (True where token was masked)
+                    # correct: [Batch, Length]
+                    correct = (predictions == labels) & mask
+                    masked_accuracy = correct.sum().float() / num_masked.sum().clamp(min=1)
+                    
+                    # Perplexity
+                    perplexity = torch.exp(sample_loss.mean())
+
+                # Update Progress Bar
+                pbar.set_postfix({
+                    "Loss": f"{loss.item() * args.gradient_accumulation_steps:.4f}",
+                    "PPL": f"{perplexity.item():.2f}",
+                    "Acc": f"{masked_accuracy.item():.2%}"
+                })
                 
             except Exception as e:
                 print(f"Error in training step: {e}")
@@ -199,6 +248,9 @@ def train(args):
                 import traceback
                 traceback.print_exc()
                 raise e # Re-raise to stop training completely
+        
+        # Cleanup at end of epoch
+        optimizer.zero_grad()
         
         if num_batches > 0:
             avg_loss = total_loss / num_batches
@@ -212,13 +264,16 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_length", type=int, default=32)
     parser.add_argument("--lora_r", type=int, default=8)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.1)
     parser.add_argument("--masking_boost_ratio", type=float, default=0.5, help="Log boost factor for number of masked tokens")
+    parser.add_argument("--num_workers", type=int, default=2, help="Number of DataLoader workers")
+    parser.add_argument("--use_8bit_adam", action="store_true", help="Use bitsandbytes 8-bit AdamW")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients")
     args = parser.parse_args()
     
     train(args)
