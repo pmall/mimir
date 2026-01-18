@@ -1,12 +1,18 @@
-import math
+"""Resource estimation script for training with variable masking."""
+
 import csv
+import math
 from collections import Counter
 from pathlib import Path
 
+
 def nCr(n, r):
+    """Calculate n choose r (binomial coefficient)."""
     return math.factorial(n) // (math.factorial(r) * math.factorial(n - r))
 
+
 def estimate_resources():
+    """Estimate training resources based on dataset statistics."""
     print("--- Training Resource Estimation (Actual Dataset) ---\n")
     
     # 1. Load Real Dataset Statistics
@@ -64,14 +70,13 @@ def estimate_resources():
     # Therefore, the *true* number of unique training samples the model sees is likely LOWER than this theoretical upper bound.
     # This means the model will converge faster than the raw "1x coverage" estimate suggests.
     
-    
     # 3. Epoch Estimation
     required_epochs = total_unique_masked_samples / total_sequences
     print(f"\nRecommended Epochs (1x Coverage): {required_epochs:.2f}")
 
     # 4. Time Estimation
-    t4_throughput = 150 # samples/sec (Conservative est)
-    h100_throughput = 1200 # samples/sec (Conservative est)
+    t4_throughput = 150  # samples/sec (Conservative est)
+    h100_throughput = 1200  # samples/sec (Conservative est)
     
     t4_time_sec = total_unique_masked_samples / t4_throughput
     h100_time_sec = total_unique_masked_samples / h100_throughput
@@ -80,6 +85,7 @@ def estimate_resources():
     print(f"Total Training Steps: {total_unique_masked_samples:,}")
     print(f"Google Colab T4 (Est. {t4_throughput} samp/s): {t4_time_sec/60:.1f} minutes")
     print(f"Google Colab H100 (Est. {h100_throughput} samp/s): {h100_time_sec/60:.1f} minutes")
+
 
 if __name__ == "__main__":
     estimate_resources()

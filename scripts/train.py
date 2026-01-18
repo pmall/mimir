@@ -1,20 +1,23 @@
+"""Training script for fine-tuning ESM-3 with LoRA on peptide sequences."""
 
-import os
 import argparse
+import csv
+import os
+import sys
+
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from peft import get_peft_model, LoraConfig
 
+from esm.models.esm3 import ESM3
 from mimir.dataset import PeptideDataset, create_dynamic_collate_fn
 from mimir.tokenizer import AminoAcidTokenizer
-from esm.models.esm3 import ESM3
 
 try:
     from mimir.model_utils import resize_esm3_tokens
 except ImportError:
     # Allow running without mimir installed if file is local
-    import sys
     sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
     from mimir.model_utils import resize_esm3_tokens
 
@@ -45,7 +48,6 @@ def train(args):
         return
 
     # Extract unique targets to build vocabulary
-    import csv
     targets = set()
     with open(dataset_path) as f:
         reader = csv.DictReader(f)
@@ -87,7 +89,7 @@ def train(args):
     
     # CRITICAL: Resize Embeddings
     # ---------------------------
-    # We must resizing the model's embedding tables to accommodate the new target tokens.
+    # We must resize the model's embedding tables to accommodate the new target tokens.
     # We use our custom safe utility for this.
     try:
         resize_esm3_tokens(model, tokenizer.vocab_size)
@@ -159,11 +161,9 @@ def train(args):
             tokens = batch["tokens"].to(device)   # Input: Masked sequences
             labels = batch["labels"].to(device)   # Target: Original IDs at masked pos, -100 otherwise
             
-            # Optimizer handling moved to accumulation step
-            
             try:
                 # Forward Pass
-                # We simply pass the token sequence. 
+                # We pass the token sequence; ESM-3 returns 'sequence_logits'.
 
                 # ESM-3 returns an output object containing 'sequence_logits'.
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
@@ -263,9 +263,7 @@ def train(args):
                 # Optional: print full traceback for debugging
                 import traceback
                 traceback.print_exc()
-                raise e # Re-raise to stop training completely
-        
-
+                raise e  # Re-raise to stop training completely
         
         if num_batches > 0:
             avg_loss = total_loss / num_batches
@@ -288,6 +286,8 @@ def train(args):
             os.makedirs(save_path, exist_ok=True)
             model.save_pretrained(save_path)
             print(f"Saved checkpoint to {save_path}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=1)

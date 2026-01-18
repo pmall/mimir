@@ -83,7 +83,7 @@ def create_dynamic_collate_fn(pad_idx: int, mask_idx: int) -> Callable:
         # Create a copy for labels (ground truth)
         labels = batch_tokens.clone()
         
-        # Initialize inputs as a copy of ground truth (we will overwrite some with <mask,>)
+        # Initialize inputs as a copy of ground truth (we will overwrite some with <mask>)
         inputs = batch_tokens.clone()
         
         # Iterate over each sequence in the batch to apply random masking
@@ -151,7 +151,6 @@ class PeptideDataset(Dataset):
         - length: Original sequence length (before padding)
         - target_id: Integer ID of target protein (-1 if no target)
     """
-
 
     def __init__(
         self,

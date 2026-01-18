@@ -1,6 +1,13 @@
+"""Tokenizer for amino acid sequences using ESM-3's vocabulary.
+
+This module provides a wrapper around ESM-3's tokenizer that handles
+target conditioning tokens for fine-tuning.
+"""
 
 from typing import List, Optional
+
 from esm.tokenization import EsmSequenceTokenizer
+
 
 class AminoAcidTokenizer:
     """
@@ -56,7 +63,7 @@ class AminoAcidTokenizer:
         Encode a sequence into token IDs.
         Includes BOS and EOS tokens automatically by the underlying tokenizer.
         """
-        # EsmSequenceTokenizer.encode adds BOS and EOS by default?
+        # EsmSequenceTokenizer.encode adds BOS and EOS by default
         # Based on explore output: [0, 20, ..., 2]. 0 is likely BOS, 2 is EOS.
         ids = self.tokenizer.encode(sequence)
         
@@ -64,8 +71,7 @@ class AminoAcidTokenizer:
             return ids
             
         if len(ids) > max_length:
-            # Simple truncation. 
-            # Ideally we keep valid tokens.
+            # Simple truncation
             ids = ids[:max_length]
         
         if len(ids) < max_length:
@@ -74,7 +80,7 @@ class AminoAcidTokenizer:
         return ids
 
     def decode(self, tokens: List[int]) -> str:
-        # Handle custom tokens if present in the list?
-        # For now, filter them out before decoding with base tokenizer, or handle errors.
+        # Handle custom tokens if present in the list
+        # Filter them out before decoding with base tokenizer
         base_tokens = [t for t in tokens if t < self.base_vocab_size]
         return self.tokenizer.decode(base_tokens)

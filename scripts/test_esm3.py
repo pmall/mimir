@@ -1,8 +1,12 @@
+"""Test script to verify ESM-3 model loading and generation."""
+
 import torch
 from esm.models.esm3 import ESM3
 from esm.sdk.api import ESM3InferenceClient, GenerationConfig, ESMProtein
 
+
 def test_esm3():
+    """Load ESM-3 and run a test generation from a fully masked sequence."""
     print("Loading ESM-3 model...")
     client: ESM3InferenceClient = ESM3.from_pretrained("esm3_sm_open_v1")
     
@@ -31,6 +35,7 @@ def test_esm3():
         import traceback
         traceback.print_exc()
         raise e
+
 
 if __name__ == "__main__":
     test_esm3()
