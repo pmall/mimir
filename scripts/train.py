@@ -141,12 +141,16 @@ def train(args):
             try:
                 # Forward Pass
                 # We simply pass the token sequence. 
+                # Forward Pass
+                # We simply pass the token sequence. 
                 # ESM-3 returns an output object containing 'sequence_logits'.
-                output = model(sequence_tokens=tokens)
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    output = model(sequence_tokens=tokens)
                 
                 # Compute Loss
                 # Output shape: [Batch, Length, Vocab]
-                logits = output.sequence_logits
+                # Cast to float32 for CrossEntropy stability
+                logits = output.sequence_logits.float()
                 
                 # Flatten logits and labels for CrossEntropy
                 # Logits: [B*L, Vocab]
@@ -194,7 +198,7 @@ def train(args):
                 # Optional: print full traceback for debugging
                 import traceback
                 traceback.print_exc()
-                break
+                raise e # Re-raise to stop training completely
         
         if num_batches > 0:
             avg_loss = total_loss / num_batches
