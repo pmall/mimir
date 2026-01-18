@@ -148,6 +148,9 @@ def train(args):
     for epoch in range(args.epochs):
         print(f"Epoch {epoch+1}/{args.epochs}")
         total_loss = 0
+        total_correct_masked = 0
+        total_masked_tokens = 0
+        total_perplexity = 0
         num_batches = 0
         
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
@@ -234,6 +237,11 @@ def train(args):
                     
                     # Perplexity
                     perplexity = torch.exp(sample_loss.mean())
+                    
+                    # Accumulate for Epoch Summary
+                    total_correct_masked += correct.sum().item()
+                    total_masked_tokens += num_masked.sum().item()
+                    total_perplexity += perplexity.item()
 
                 # Update Progress Bar
                 pbar.set_postfix({
@@ -254,13 +262,25 @@ def train(args):
         
         if num_batches > 0:
             avg_loss = total_loss / num_batches
-            print(f"Average Loss: {avg_loss:.4f}")
+            avg_acc = total_correct_masked / max(1, total_masked_tokens)
+            avg_ppl = total_perplexity / num_batches
+            
+            print("-" * 60)
+            print(f"Epoch {epoch+1} Summary:")
+            print(f"  Avg Loss:       {avg_loss:.4f}")
+            print(f"  Avg Perplexity: {avg_ppl:.4f}")
+            print(f"  Masked Accuracy: {avg_acc:.2%}")
+            print("-" * 60)
         
         # Save checkpoint periodically
-        save_path = f"checkpoints/epoch_{epoch}"
-        os.makedirs(save_path, exist_ok=True)
-        model.save_pretrained(save_path)
-        print(f"Saved checkpoint to {save_path}")
+        # Logic: Save if periodic frequency hits OR if it's the very last epoch
+        should_save = ((epoch + 1) % args.save_freq == 0) or (epoch == args.epochs - 1)
+        
+        if should_save:
+            save_path = f"checkpoints/epoch_{epoch}"
+            os.makedirs(save_path, exist_ok=True)
+            model.save_pretrained(save_path)
+            print(f"Saved checkpoint to {save_path}")
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=1)
@@ -274,6 +294,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=2, help="Number of DataLoader workers")
     parser.add_argument("--use_8bit_adam", action="store_true", help="Use bitsandbytes 8-bit AdamW")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients")
+    parser.add_argument("--save_freq", type=int, default=50, help="Save checkpoint every N epochs (and always the last one)")
     args = parser.parse_args()
     
     train(args)
