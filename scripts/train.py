@@ -164,8 +164,7 @@ def train(args):
             try:
                 # Forward Pass
                 # We simply pass the token sequence. 
-                # Forward Pass
-                # We simply pass the token sequence. 
+
                 # ESM-3 returns an output object containing 'sequence_logits'.
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                     output = model(sequence_tokens=tokens)
@@ -174,6 +173,15 @@ def train(args):
                 # Output shape: [Batch, Length, Vocab]
                 # Cast to float32 for CrossEntropy stability
                 logits = output.sequence_logits.float()
+                
+                # CRITICAL Fix: Mask Target Logits
+                # -------------------------------
+                # The model should NEVER predict a target ID (which we added to the vocab)
+                # for a masked sequence position.
+                # Base vocab size is ~33 (amino acids + special tokens).
+                # All tokens >= base_vocab_size are Targets.
+                # We force their probability to 0 by setting logits to -inf.
+                logits[..., dataset.tokenizer.base_vocab_size:] = float('-inf')
                 
                 # Flatten logits and labels for CrossEntropy
                 # Logits: [B*L, Vocab]
@@ -257,8 +265,7 @@ def train(args):
                 traceback.print_exc()
                 raise e # Re-raise to stop training completely
         
-        # Cleanup at end of epoch
-        optimizer.zero_grad()
+
         
         if num_batches > 0:
             avg_loss = total_loss / num_batches
