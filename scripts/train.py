@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from peft import get_peft_model, LoraConfig
+from transformers import get_cosine_schedule_with_warmup
 
 from esm.models.esm3 import ESM3
 from mimir.dataset import PeptideDataset, create_dynamic_collate_fn
@@ -145,6 +146,20 @@ def train(args):
     # We use CrossEntropyLoss with reduction='none' to handle per-sample weighting.
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
 
+    # Scheduler Setup
+    # ---------------
+    # Calculate total training steps
+    num_update_steps_per_epoch = len(dataloader) // args.gradient_accumulation_steps
+    max_train_steps = args.epochs * num_update_steps_per_epoch
+    
+    print(f"Total training steps: {max_train_steps}")
+    
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=args.warmup_steps,
+        num_training_steps=max_train_steps
+    )
+
     # 6. Training Execution
     # ---------------------
     for epoch in range(args.epochs):
@@ -225,7 +240,11 @@ def train(args):
                 loss.backward()
                 
                 if (num_batches + 1) % args.gradient_accumulation_steps == 0:
+                    # Gradient Clipping
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    
                     optimizer.step()
+                    scheduler.step()
                     optimizer.zero_grad()
                 
                 total_loss += loss.item() * args.gradient_accumulation_steps # Scale back for logging
@@ -311,6 +330,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_8bit_adam", action="store_true", help="Use bitsandbytes 8-bit AdamW")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients")
     parser.add_argument("--save_freq", type=int, default=50, help="Save checkpoint every N epochs (and always the last one)")
+    parser.add_argument("--warmup_steps", type=int, default=100, help="Number of warmup steps for scheduler")
     args = parser.parse_args()
     
     train(args)
