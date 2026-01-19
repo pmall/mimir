@@ -108,9 +108,9 @@ def create_dynamic_collate_fn(pad_idx: int, mask_idx: int) -> Callable:
                 continue
                 
             # Calculate number of tokens to mask
-            # Constraint: Variable masking between 15% and 50%
-            # We sample a ratio uniformly from [0.15, 0.5]
-            ratio = torch.empty(1).uniform_(0.15, 0.5).item()
+            # Constraint: Variable masking between 25% and 75%
+            # We sample a ratio uniformly from [0.25, 0.75]
+            ratio = torch.empty(1).uniform_(0.25, 0.75).item()
             
             seq_len = valid_end - valid_start
             num_mask = max(1, int(seq_len * ratio))
