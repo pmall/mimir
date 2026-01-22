@@ -54,7 +54,7 @@ def train(args):
         print(f"Dataset not found at {dataset_path}. Please check the path.")
         return
 
-    # Extract unique targets to build vocabulary
+    # Extract unique targets to build vocabulary (Dataset will handle max_length)
     targets = set()
     with open(dataset_path) as f:
         reader = csv.DictReader(f)
@@ -65,11 +65,10 @@ def train(args):
     # Initialize Tokenizer with targets
     tokenizer = AminoAcidTokenizer(targets=list(targets))
     
-    # Initialize Dataset
+    # Initialize Dataset (Auto-max-length)
     dataset = PeptideDataset(
         dataset_path=dataset_path,
         tokenizer=tokenizer,
-        max_length=args.max_length,
     )
     
     # Initialize Dynamic Collator with Masking
@@ -176,6 +175,8 @@ def train(args):
 
     # 6. Training Execution
     # ---------------------
+    best_loss = float('inf')
+    
     for epoch in range(args.epochs):
         print(f"Epoch {epoch+1}/{args.epochs}")
         total_loss = 0
@@ -319,15 +320,23 @@ def train(args):
             print(f"  Masked Accuracy: {avg_acc:.2%}")
             print("-" * 60)
         
-        # Save checkpoint periodically
-        # Logic: Save if periodic frequency hits OR if it's the very last epoch
-        should_save = ((epoch + 1) % args.save_freq == 0) or (epoch == args.epochs - 1)
+        # Save Checkpoints
+        # ----------------
         
-        if should_save:
-            save_path = f"checkpoints/epoch_{epoch}"
-            os.makedirs(save_path, exist_ok=True)
-            model.save_pretrained(save_path)
-            print(f"Saved checkpoint to {save_path}")
+        # 1. Save Last Model (Always overwrites to keep latest state)
+        last_path = "checkpoints/last_model"
+        os.makedirs(last_path, exist_ok=True)
+        model.save_pretrained(last_path)
+        
+        # 2. Save Best Model (Only if loss improves)
+        if avg_true_loss < best_loss:
+            best_loss = avg_true_loss
+            best_path = "checkpoints/best_model"
+            os.makedirs(best_path, exist_ok=True)
+            model.save_pretrained(best_path)
+            print(f"New Best Model! (Loss: {best_loss:.4f}). Saved to {best_path}")
+        else:
+            print(f"Saved latest model to {last_path}")
 
 
 if __name__ == "__main__":
@@ -335,7 +344,6 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--max_length", type=int, default=32)
     parser.add_argument("--lora_r", type=int, default=8)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.1)
@@ -343,7 +351,6 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=2, help="Number of DataLoader workers")
     parser.add_argument("--use_8bit_adam", action="store_true", help="Use bitsandbytes 8-bit AdamW")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients")
-    parser.add_argument("--save_freq", type=int, default=50, help="Save checkpoint every N epochs (and always the last one)")
     parser.add_argument("--warmup_steps", type=int, default=100, help="Number of warmup steps for scheduler")
     parser.add_argument("--dataset", type=str, default="data/peptide_dataset.csv", help="Path to the training dataset CSV")
     args = parser.parse_args()

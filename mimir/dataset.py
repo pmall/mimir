@@ -1,11 +1,9 @@
 """
 PyTorch Dataset for peptide sequences.
 
-This module handles variable-length peptides (4-20 amino acids) with two strategies:
-1. Static padding: Pad all sequences to max_length (20) - simple but wastes compute
-2. Dynamic padding: Pad to longest sequence in batch - efficient GPU utilization
-
-The dynamic_collate_fn implements strategy #2, which is recommended for training.
+This module handles variable-length peptides (e.g. 4-512+ amino acids) using dynamic padding.
+It delegates padding to the `dynamic_collate_fn` to ensure efficient GPU utilization 
+by padding only to the longest sequence in the batch.
 """
 
 import csv
@@ -147,8 +145,8 @@ class PeptideDataset(Dataset):
     Dataset for peptide sequences with optional targets.
 
     Each sample contains:
-        - sequence: Tokenized peptide sequence (padded to max_length)
-        - length: Original sequence length (before padding)
+        - sequence: Tokenized peptide sequence (No padding at dataset level; handled by collate_fn)
+        - length: Original sequence length
         - target_id: Integer ID of target protein (-1 if no target)
     """
 
@@ -156,7 +154,6 @@ class PeptideDataset(Dataset):
         self,
         dataset_path: str | Path,
         tokenizer: AminoAcidTokenizer,
-        max_length: int = 20,
     ):
         """
         Load dataset from CSV file.
@@ -164,10 +161,8 @@ class PeptideDataset(Dataset):
         Args:
             dataset_path: Path to dataset.csv
             tokenizer: AminoAcidTokenizer instance
-            max_length: Maximum sequence length for padding
         """
         self.tokenizer = tokenizer
-        self.max_length = max_length
         self.samples = []
         
         # We no longer build target_to_id here. 
@@ -184,15 +179,13 @@ class PeptideDataset(Dataset):
                 )
         
         # Pre-calculate lengths for LengthGroupedSampler
-        # Length = len(sequence) + 3 (Target + BOS + EOS)
-        # We cap at max_length for the sampler's view, so batches are grouped by *actual* tensor size
         self.lengths = []
         for s in self.samples:
             # +3 for Target, BOS, EOS
             l = len(s["sequence"]) + 3
-            if l > max_length:
-                l = max_length
             self.lengths.append(l)
+            
+        print(f"Dataset loaded with {len(self.samples)} samples. Max length detected: {max(self.lengths) if self.lengths else 0}")
 
     def get_lengths(self) -> list[int]:
         """Return list of lengths for all samples."""
@@ -210,27 +203,19 @@ class PeptideDataset(Dataset):
         try:
             target_id = self.tokenizer.get_target_id(target)
         except ValueError:
-            # Fallback or error? For now error desirable to catch issues.
-            # But during training we expect all targets to be known.
-            # If generating new data, maybe -1?
             target_id = -1 
 
-        # Encode sequence (BOS...EOS) WITHOUT padding
-        # We need raw IDs to calculate length correctly
+        # Encode sequence (BOS...EOS)
         seq_tokens = self.tokenizer.encode(sequence, max_length=None)
         
         # Prepend target token
         # [TARGET] [BOS] ... [EOS]
         tokens = [target_id] + seq_tokens
         
-        # Handle Truncation if exceeding max_length
-        if len(tokens) > self.max_length:
-            # Safer Truncation: Preserve the EOS token (tokens[-1])
-            # We take the first (max_length - 1) tokens and append the last one
-            tokens = tokens[:self.max_length - 1] + [tokens[-1]]
+        # No truncation logic - Return exactly what the dataset provides.
             
         return {
             "tokens": torch.tensor(tokens, dtype=torch.long),
-            "length": torch.tensor(len(tokens), dtype=torch.long), # Actual length including target
+            "length": torch.tensor(len(tokens), dtype=torch.long),
             "target_id": torch.tensor(target_id, dtype=torch.long),
         }
