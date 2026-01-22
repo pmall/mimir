@@ -14,6 +14,7 @@ from transformers import get_cosine_schedule_with_warmup
 from esm.models.esm3 import ESM3
 from mimir.dataset import PeptideDataset, create_dynamic_collate_fn
 from mimir.tokenizer import AminoAcidTokenizer
+from mimir.sampler import LengthGroupedSampler
 
 try:
     from mimir.model_utils import resize_esm3_tokens
@@ -43,9 +44,14 @@ def train(args):
     # -------------------
     print("Loading tokenizer and dataset...")
     
-    dataset_path = os.path.join(os.path.dirname(__file__), "../data/dataset.csv")
+    # Resolve absolute path if relative
+    if not os.path.isabs(args.dataset):
+        dataset_path = os.path.join(os.path.dirname(__file__), "..", args.dataset)
+    else:
+        dataset_path = args.dataset
+
     if not os.path.exists(dataset_path):
-        print(f"Dataset not found at {dataset_path}. Please run generate_dataset.py first.")
+        print(f"Dataset not found at {dataset_path}. Please check the path.")
         return
 
     # Extract unique targets to build vocabulary
@@ -73,10 +79,18 @@ def train(args):
         mask_idx=dataset.tokenizer.mask_token_id
     )
     
+    # Initialize Sampler for Smart Batching
+    sampler = LengthGroupedSampler(
+        dataset=dataset, 
+        batch_size=args.batch_size, 
+        drop_last=False
+    )
+
     dataloader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 
-        shuffle=True, 
+        sampler=sampler, # Use custom sampler
+        shuffle=False,   # Must be False when using sampler
         collate_fn=collate_fn,
         num_workers=args.num_workers,
         pin_memory=True if torch.cuda.is_available() else False
@@ -331,6 +345,7 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients")
     parser.add_argument("--save_freq", type=int, default=50, help="Save checkpoint every N epochs (and always the last one)")
     parser.add_argument("--warmup_steps", type=int, default=100, help="Number of warmup steps for scheduler")
+    parser.add_argument("--dataset", type=str, default="data/peptide_dataset.csv", help="Path to the training dataset CSV")
     args = parser.parse_args()
     
     train(args)

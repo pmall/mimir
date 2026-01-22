@@ -1,91 +1,179 @@
 """Resource estimation script for training with variable masking."""
 
+import argparse
 import csv
 import math
+import os
+import sys
 from collections import Counter
 from pathlib import Path
 
 
 def nCr(n, r):
     """Calculate n choose r (binomial coefficient)."""
-    return math.factorial(n) // (math.factorial(r) * math.factorial(n - r))
+    try:
+        return math.factorial(n) // (math.factorial(r) * math.factorial(n - r))
+    except (ValueError, OverflowError):
+        return float('inf')
 
 
-def estimate_resources():
-    """Estimate training resources based on dataset statistics."""
-    print("--- Training Resource Estimation (Actual Dataset) ---\n")
+def estimate_resources(args):
+    """Estimate training resources based on dataset statistics or simulation."""
+    print("--- Training Resource Estimation ---\n")
     
-    # 1. Load Real Dataset Statistics
-    dataset_path = Path("data/dataset.csv")
-    if not dataset_path.exists():
-        print("Dataset not found. Please run generate_dataset.py first.")
+    lengths = []
+    
+    # Mode 1: Simulation
+    if args.length:
+        print(f"Mode: SIMULATION (Length={args.length}, Count={args.count})")
+        lengths = [args.length] * args.count
+        total_sequences = args.count
+        
+    # Mode 2: Real Dataset
+    else:
+        # Resolve path
+        if not os.path.isabs(args.dataset):
+            dataset_path = Path(__file__).parent.parent / args.dataset
+        else:
+            dataset_path = Path(args.dataset)
+            
+        print(f"Mode: DATASET Analysis ({dataset_path})")
+            
+        if not dataset_path.exists():
+            print(f"Error: Dataset not found at {dataset_path}")
+            return
+
+        with open(dataset_path) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                lengths.append(len(row["sequence"]))
+        
+        total_sequences = len(lengths)
+        print(f"Total Sequences in Dataset: {total_sequences:,}")
+
+    if not lengths:
+        print("No data to analyze.")
         return
 
-    lengths = []
-    with open(dataset_path) as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            lengths.append(len(row["sequence"]))
-            
-    total_sequences = len(lengths)
     length_counts = Counter(lengths)
-    
-    print(f"Total Sequences in Dataset: {total_sequences:,}")
     
     # 2. Combinatorial Space Calculation
     total_unique_masked_samples = 0
     
-    print("\nBreakdown by Length:")
+    # Only print table if not too many distinct lengths (or top N)
+    print("\nBreakdown by Length (Top 10 most frequent if >20 types):")
     print(f"{'Len':<5} | {'Count':<6} | {'Masks':<5} | {'Combinations (Sum)':<20} | {'Total Unique Samples':<20}")
     print("-" * 80)
     
     sorted_lengths = sorted(length_counts.keys())
+    if len(sorted_lengths) > 20:
+        # If too many lengths, show summary stats instead of full table? 
+        # Or just show meaningful ones. For now, full list if small, else ranges?
+        # Let's just iterate all but suppress print if too long?
+        # Actually user wants to see stats. Let's show specific percentiles or range.
+        # For simulation, there is only 1.
+        pass
+
+    # Stats aggregation
+    processed_count = 0
     
     for length in sorted_lengths:
         count = length_counts[length]
+        processed_count += 1
         
-        # Variable Masking: 15% to 50%
-        min_mask = max(1, int(length * 0.15))
-        max_mask = max(1, int(length * 0.50))
+        # Variable Masking: 25% to 75% (Updated to match dataset.py)
+        min_mask = max(1, int(length * 0.25))
+        max_mask = max(1, int(length * 0.75))
         
         total_combinations_len = 0
         mask_counts_str = f"{min_mask}-{max_mask}"
         
         # Sum combinations for all valid mask counts in the ratio range
-        for k in range(min_mask, max_mask + 1):
-            total_combinations_len += nCr(length, k)
+        # Capping N to avoid massive factorial computation time for large L
+        if length > 200:
+            # Approximation or skip full summation? 
+            # For 200aa, 2^200 is huge.
+            # We treat it as "Effectively Infinite" for coverage purposes.
+            unique_samples_for_len = float('inf')
+        else:
+            for k in range(min_mask, max_mask + 1):
+                res = nCr(length, k)
+                if res == float('inf'):
+                    total_combinations_len = float('inf')
+                    break
+                total_combinations_len += res
             
-        unique_samples_for_len = count * total_combinations_len
+            if total_combinations_len == float('inf'):
+                unique_samples_for_len = float('inf')
+            else:
+                unique_samples_for_len = count * total_combinations_len
+
         total_unique_masked_samples += unique_samples_for_len
         
-        print(f"{length:<5} | {count:<6} | {mask_counts_str:<5} | {total_combinations_len:<20,} | {unique_samples_for_len:<20,}")
+        # Print only first few or if simulation
+        if processed_count <= 10 or args.length:
+            val_str = f"{unique_samples_for_len:,.0f}" if unique_samples_for_len != float('inf') else "Infinite"
+            combo_str = f"{total_combinations_len:,.0f}" if total_combinations_len != float('inf') else "Infinite"
+            print(f"{length:<5} | {count:<6} | {mask_counts_str:<5} | {combo_str:<20} | {val_str:<20}")
+
+    if processed_count > 10 and not args.length:
+        print(f"... and {processed_count - 10} more length buckets.")
 
     print("-" * 80)
-    print(f"Total Unique Masked Variations: {total_unique_masked_samples:,}")
+    total_str = f"{total_unique_masked_samples:,.0f}" if total_unique_masked_samples != float('inf') else "Effectively Infinite"
+    print(f"Total Unique Masked Variations: {total_str}")
     
-    # NOTE: Combinatorial Collision
-    # The calculation above assumes every masked variation is unique.
-    # In reality, many peptides likely share subsequences. 
-    # Different source sequences might produce the exact same masked input (e.g., A [MASK] C).
-    # Therefore, the *true* number of unique training samples the model sees is likely LOWER than this theoretical upper bound.
-    # This means the model will converge faster than the raw "1x coverage" estimate suggests.
-    
-    # 3. Epoch Estimation
-    required_epochs = total_unique_masked_samples / total_sequences
-    print(f"\nRecommended Epochs (1x Coverage): {required_epochs:.2f}")
+    print("\n--- Recommendation ---")
+    if total_unique_masked_samples == float('inf') or total_unique_masked_samples > 1e15:
+        print("The combinatorial space is enormous. You cannot achieve '1x coverage'.")
+        print("Focus on 'Convergence' instead.")
+        print("Recommended: Train until loss plateaus (likely 50-100 epochs depending on dataset size).")
+    else:
+        # 3. Epoch Estimation
+        required_epochs = total_unique_masked_samples / total_sequences
+        print(f"Recommended Epochs for 1x Coverage: {required_epochs:.2f}")
 
     # 4. Time Estimation
-    t4_throughput = 150  # samples/sec (Conservative est)
-    h100_throughput = 1200  # samples/sec (Conservative est)
+    # Throughput scales inversely with length roughly (O(L^2) for attention, or O(L) for linear parts)
+    # T4 Baseline: ~150 samples/sec for L=20ish.
+    # For L=512, throughput will drop significantly.
     
-    t4_time_sec = total_unique_masked_samples / t4_throughput
-    h100_time_sec = total_unique_masked_samples / h100_throughput
+    # Rough scaling factor based on mean length
+    mean_len = sum(k*v for k,v in length_counts.items()) / total_sequences
     
-    print(f"\nTime Estimation for 1x Coverage ({int(required_epochs)} epochs):")
-    print(f"Total Training Steps: {total_unique_masked_samples:,}")
-    print(f"Google Colab T4 (Est. {t4_throughput} samp/s): {t4_time_sec/60:.1f} minutes")
-    print(f"Google Colab H100 (Est. {h100_throughput} samp/s): {h100_time_sec/60:.1f} minutes")
+    # Just a heuristic: T4 ~ 150 @ L=20. @ L=200 -> ? Maybe 30?
+    # Let's use a simpler heuristic: Tokens per second.
+    # T4 ~ 4000 tokens/sec? 
+    # Let's say T4 = 150 items/sec * 20 tokens/item = 3000 tokens/sec baseline.
+    
+    tokens_per_sec_t4 = 3000
+    tokens_per_sec_h100 = 25000 # ~8-10x speedup
+    
+    avg_tokens_per_sample = mean_len
+    est_t4_throughput = tokens_per_sec_t4 / avg_tokens_per_sample
+    est_h100_throughput = tokens_per_sec_h100 / avg_tokens_per_sample
+    
+    print(f"\nThroughput Estimation (Mean Length {mean_len:.1f}):")
+    print(f"  T4:   ~{est_t4_throughput:.1f} samples/sec")
+    print(f"  H100: ~{est_h100_throughput:.1f} samples/sec")
+    
+    # Calc time for 100 epochs as a standard benchmark
+    benchmark_epochs = 100
+    total_steps_100ep = total_sequences * benchmark_epochs
+    
+    t4_time = total_steps_100ep / est_t4_throughput
+    h100_time = total_steps_100ep / est_h100_throughput
+    
+    print(f"\nTime for {benchmark_epochs} Epochs:")
+    print(f"  T4:   {t4_time/3600:.2f} hours")
+    print(f"  H100: {h100_time/3600:.2f} hours")
 
 
 if __name__ == "__main__":
-    estimate_resources()
+    parser = argparse.ArgumentParser(description="Estimate training resources")
+    parser.add_argument("--dataset", type=str, default="data/peptide_dataset.csv", help="Path to dataset")
+    parser.add_argument("--length", type=int, help="Simulate a specific sequence length")
+    parser.add_argument("--count", type=int, default=10000, help="Number of sequences for simulation (default 10k)")
+    
+    args = parser.parse_args()
+    estimate_resources(args)

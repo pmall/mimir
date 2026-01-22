@@ -182,6 +182,21 @@ class PeptideDataset(Dataset):
                         "target": row["target"],
                     }
                 )
+        
+        # Pre-calculate lengths for LengthGroupedSampler
+        # Length = len(sequence) + 3 (Target + BOS + EOS)
+        # We cap at max_length for the sampler's view, so batches are grouped by *actual* tensor size
+        self.lengths = []
+        for s in self.samples:
+            # +3 for Target, BOS, EOS
+            l = len(s["sequence"]) + 3
+            if l > max_length:
+                l = max_length
+            self.lengths.append(l)
+
+    def get_lengths(self) -> list[int]:
+        """Return list of lengths for all samples."""
+        return self.lengths
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -210,11 +225,9 @@ class PeptideDataset(Dataset):
         
         # Handle Truncation if exceeding max_length
         if len(tokens) > self.max_length:
-            # We must truncate. Ideally we keep EOS. 
-            # Current naive strategy: just simple slice, EOS likely lost if sequence is long.
-            # Ideally: tokens = tokens[:self.max_length-1] + [tokens[-1]] if tokens[-1] is EOS?
-            # For strictness:
-            tokens = tokens[:self.max_length]
+            # Safer Truncation: Preserve the EOS token (tokens[-1])
+            # We take the first (max_length - 1) tokens and append the last one
+            tokens = tokens[:self.max_length - 1] + [tokens[-1]]
             
         return {
             "tokens": torch.tensor(tokens, dtype=torch.long),
