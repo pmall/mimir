@@ -146,8 +146,11 @@ def estimate_resources(args):
     # T4 ~ 4000 tokens/sec? 
     # Let's say T4 = 150 items/sec * 20 tokens/item = 3000 tokens/sec baseline.
     
-    tokens_per_sec_t4 = 3000
-    tokens_per_sec_h100 = 25000 # ~8-10x speedup
+    # Updated based on empirical data: T4 ~ 2 hours/epoch for 60k samples (mean len ~200-300?)
+    # Empirical: ~2200 tokens/sec
+    tokens_per_sec_t4 = 2200
+    # A100 is ~10-12x faster: Native BF16 (2x vs T4) + Raw Compute (5x) + HBM (5x)
+    tokens_per_sec_h100 = 26000
     
     avg_tokens_per_sample = mean_len
     est_t4_throughput = tokens_per_sec_t4 / avg_tokens_per_sample
