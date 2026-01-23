@@ -1,71 +1,79 @@
 # MÍMIR
 
-**MÍMIR** is a generative AI project designed to generate peptides that bind to specific human protein targets.
+**MÍMIR** is a specialized framework for **de novo peptide design**.
+
+By leveraging the generative capabilities of **ESM-3**, MÍMIR outputs novel peptide sequences (< 20 amino acids) conditioned to bind specific human protein targets. It transforms the problem of finding a binder from a random search into a targeted generation task.
 
 ## The Concept
 
-Designing proteins that bind to specific targets is a complex biological puzzle. In the past, this required checking billions of random combinations or training models from scratch on limited data. **MÍMIR** takes a different approach: **"Steering a Giant."**
+Finding effective peptide binders for specific protein targets is a challenge of **combinatorial biology**. The number of possible peptide sequences is astronomical (20^sequence_length), making random screening inefficient.
 
-### 1. The Engine: ESM-3
+**MÍMIR** solves this by treating biology as a language.
 
-We are not building a brain from scratch. We are using **ESM-3**, a state-of-the-art "Large Protein Model" trained on billions of evolutionary sequences. ESM-3 already understands the fundamental laws of biology—how proteins fold, interact, and function—much like how GPT-4 understands grammar and logic.
+### 1. The Foundation: ESM-3
 
-### 2. The Conditioning: Dealing with "Who?"
+We leverage **ESM-3**, a "Large Protein Model" trained on billions of evolutionary sequences. ESM-3 has already mastered the grammar of protein biology—it knows which amino acid sequences are stable, valid, and evolutionarily plausible. We don't need to teach it how to "be a peptide"; it already knows.
 
-ESM-3 is a generalist; it knows how to make proteins, but not _which_ protein you need right now. To solve this, we introduce **Target Conditioning**.
+### 2. The Conditioning: Dealing with "Who?" (Conditioned Generation)
 
-- We assign a unique digital "ID card" (a special token) to every human target protein (e.g., `<TARGET_P53>`).
-- We prompt the model with this token: _"Given `<TARGET_P53>`, complete the rest of this sequence."_
+The core innovation is **Target Conditioning**. ESM-3 knows how to generate valid biology, but it doesn't naturally know how to generate a binder for _your_ specific target (e.g., P53 or HER2).
 
-### 3. The Fine-Tuning: LoRA
+To bridge this gap, we introduce **Target Tokens**:
 
-We use **LoRA (Low-Rank Adaptation)** to fine-tune the model. Instead of rewriting the entire model (which is prohibitively expensive), we insert small, trainable "adapters" into its attention layers.
+- We assign a unique token (e.g., `<TARGET_P53>`) to each target protein.
+- We train the model on sequences known to bind to that target.
+- **The Result**: The model learns a **latent profile** of binding preferences for that specific target. It learns that `<TARGET_P53>` requires a specific hydrophobic motif, while `<TARGET_HER2>` needs a rigid charged loop.
 
-- These adapters learn to associate the "ID card" with specific chemical properties needed for binding.
-- This allows us to leverage the massive general knowledge of ESM-3 while steering it to focus specifically on target binding affinity.
+### 3. The Strategy: "Steering the Giant"
 
-In essence, we are taking a "Universe Simulator" of proteins and tweaking its settings so that its "Create Protein" button defaults to "Create Peptide Binder" for your specific target.
+We don't train a model from scratch. We use **LoRA (Low-Rank Adaptation)** to slightly adjust the attention mechanisms of ESM-3. This "steers" the massive pre-existing knowledge of the model toward our specific task.
+
+Effectively, we turn a general-purpose "Protein Generator" into a specialized "Peptide Binder Generator" that takes a Target ID as input and "dreams" a compatible binding sequence.
 
 ### 4. Implementation Details
 
-We implement this strategy using a **Masked Language Modeling (MLM)** objective, similar to how BERT is trained, but adapted for generative purpose:
+We implement this using a **Masked Language Modeling (MLM)** objective, heavily adapted for generation:
 
 1.  **Target Conditioning**:
-    - Every training sample is prepended with its target ID: `[TARGET_ID] [BOS] [SEQUENCE...] [EOS]`
-    - This creates a strong association: The model learns that _this_ specific ID implies _this_ style of sequence.
+    - Every sequence is permanently anchored with its target ID: `[TARGET_ID] [BOS] [SEQUENCE...] [EOS]`.
+    - This token is never masked, serving as the "prompt" for the generation.
 
-2.  **Masking Strategy**:
-    - We apply **variable random masking (15% - 50%)** to sequence tokens.
-    - **Why?** Uniform 15% masking provides insufficient training signal across all sequence lengths for this generative task. Variable higher masking forces the model to reconstruct larger portions of the structure and learn more robust internal representations.
-    - **Smart Masking**: We ensure at least one mask is always applied.
-    - **Crucial**: The `TARGET_ID` is **never masked**. It is always visible to condition the repair process.
+2.  **Training Data vs. Generation Goal**:
+    - **Training**: We train on a wide range of known **Binding Sequences** (up to 512 amino acids) to learn valid interaction patterns (the "physics" of binding).
+    - **Inference**: We constrain the model to generate short **Peptides** (< 20 amino acids). The model transfers the structural binding principles it learned from the long sequences to create novel, short peptides.
 
-3.  **Training Objective**:
-    - The model predicts the missing amino acids based on the visible ones AND the target ID.
-    - Loss is calculated _only_ on the masked positions, normalized by the number of masks.
-    - **Masking Boost**: We apply a **custom loss boost** to encourage the model to excel at "hard" examples (heavily masked sequences).
-      - Formula: Boost = 1.0 + k \* log(N_masks + 1)
-      - Where k is the `masking_boost_ratio` (default 0.5).
-      - This provides a gentle, logarithmic increase in gradient weight as the number of masks increases, prioritizing the generation of complete structures over simple single-token fixes.
+3.  **Aggressive Masking**:
+    - We use a dynamic masking ratio of **25% - 75%** (higher than the standard 15%).
+    - **Why?** To generate a new peptide, the model must be able to hallucinate valid structures from almost nothing. High masking rates force it to learn global structural dependencies rather than just local sequence repair.
+    - **Masking Boost**: A custom loss function (`Boost = 1.0 + 0.5 * log(N_masks + 1)`) creates a curriculum where the model is rewarded exponentially more for solving difficult, heavily masked scenarios.
 
-4.  **Technical Nuances**:
-    - **Embedding Resizing**: Since ESM-3 uses a fixed vocabulary, we manually resize the embedding layers to accommodate our new target tokens.
-    - **LoRA Targets**: We fine-tune specific attention modules (`layernorm_qkv` and `out_proj`) to efficiently adapt the model's "grammar" to our specific "dialect" of binders.
+4.  **Smart Batching**:
+    - We use a `LengthGroupedSampler` to group sequences of similar lengths. This creates efficient, dense batches that maximize GPU throughput (essential for training on sequences up to 512aa).
 
 ## Directory Structure
 
-- **`data/`**: Ignored directory where generated datasets are stored.
-- **`mimir/`**: Core package containing dataset and tokenizer logic.
-  - `dataset.py`: PyTorch Dataset implementation with dynamic padding.
-  - `model_utils.py`: Utilities for resizing ESM-3 embeddings.
-  - `tokenizer.py`: Wrapper around ESM-3 tokenizer.
-- **`scripts/`**: Executable scripts for data generation and training.
-  - `download_weights.py`: Triggers model weight download via `esm` library.
-  - `estimate_training.py`: Calculates sample complexity and estimates training time.
-  - `generate_dataset.py`: Extracts interacting peptide pairs from the PostgreSQL database.
-  - `test_esm3.py`: Validates installation by running a simple generation task.
-  - `train.py`: Fine-tunes ESM-3 using LoRA.
-- **`setup_esm3.sh`**: Environment setup, authentication, and weight download.
+```
+├── data/                       # Ignored directory for generated datasets
+├── mimir/                      # Core package
+│   ├── dataset.py              # PyTorch Dataset with dynamic masking logic
+│   ├── model_utils.py          # Utilities for resizing ESM-3 embeddings
+│   ├── sampler.py              # LengthGroupedSampler for smart batching
+│   ├── tokenizer.py            # Wrapper around ESM-3 tokenizer
+│   └── __init__.py
+├── notebooks/                  # Experimental notebooks
+├── scripts/                    # Executable scripts
+│   ├── dataset_utils.py        # Shared utilities for dataset generation
+│   ├── download_weights.py     # Triggers model weight download
+│   ├── estimate_training.py    # Calculates training resource requirements
+│   ├── generate_mapping_dataset.py # Generates the Mapping Dataset (Target -> Sequence)
+│   ├── generate_peptide_dataset.py # Generates the Peptide Dataset (<20aa)
+│   ├── test_esm3.py            # Validates installation
+│   └── train.py                # Main training loop with LoRA
+├── setup_esm3.sh               # Environment setup script
+├── README.md
+├── pyproject.toml
+└── uv.lock
+```
 
 ## Setup
 
@@ -78,44 +86,54 @@ This project uses `uv` for dependency management.
     ```
 
 2.  **Configure Environment**:
-    Create a `.env` file with optimization for your database:
+    Create a `.env` file (if needing DB access):
     ```
     POSTGRES_HOST=...
-    POSTGRES_PORT=...
-    POSTGRES_DB=...
-    POSTGRES_USER=...
-    POSTGRES_PASSWORD=...
+    # ... (see .env.example)
     ```
 
 ## Usage
 
-### 1. Generate Dataset
+### 1. Generate Datasets
 
-Extract the interacting peptide sequences from the database. This script generates `data/dataset.csv`.
+We generate two types of datasets:
+
+1.  **Peptide Dataset**: Short sequences (< 20aa) for specific analysis.
+2.  **Mapping Dataset**: Comprehensive binding sequences (up to 512aa) for training.
 
 ```bash
-uv run python scripts/generate_dataset.py --verbose
+uv run scripts/generate_peptide_dataset.py
+uv run scripts/generate_mapping_dataset.py
 ```
 
 ### 2. Fine-tune ESM-3
 
-Train the model using LoRA.
+Train on the **Mapping Dataset** to learn general binding rules.
 
 ```bash
-uv run scripts/train.py --epochs 500 --batch_size 4
+# Set memory fragmentation variables for stable training
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+uv run scripts/train.py \
+    --dataset data/mapping_dataset.csv \
+    --batch_size 16 \
+    --gradient_accumulation_steps 4 \
+    --epochs 100 \
+    --lr 1e-4 \
+    --use_8bit_adam
 ```
+
+**Key Parameters:**
+
+- `--batch_size`: Per-GPU batch size (e.g., 16 on H100).
+- `--gradient_accumulation_steps`: Simulates a larger batch size (e.g., 4 \* 16 = 64 effective batch).
+- `--use_8bit_adam`: Saves optimizer memory, allowing larger batches/models.
 
 ### 3. Estimate Training Resources
 
-We provide a script to estimate the combinatorial complexity and training time based on your dataset statistics and masking strategy.
+Check how long your training will take based on your specific dataset size and GPU.
 
 ```bash
 uv run scripts/estimate_training.py
 ```
-
-**Estimated Training Times (500 Epochs):**
-
-- **Google Colab (T4 GPU)**: ~3.5 hours
-- **Google Colab (H100 GPU)**: ~25 minutes
-
-_Note: 500 epochs provide robust coverage for short peptides while randomly sampling the massive combinatorial space of longer sequences._
