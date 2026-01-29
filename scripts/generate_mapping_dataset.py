@@ -33,8 +33,8 @@ def generate_mapping_dataset(verbose=False):
             writer = csv.writer(f)
             writer.writerow(["target", "sequence"])
 
-            for target, peptide in sorted(interacting_pairs):
-                writer.writerow([target, peptide])
+            for target, sequence in sorted(interacting_pairs):
+                writer.writerow([target, sequence])
 
         if verbose:
             print(f"\nMapping Dataset written to {output_path}", file=sys.stderr)
