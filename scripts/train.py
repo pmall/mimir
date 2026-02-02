@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import json
 import os
 import sys
 
@@ -22,6 +23,21 @@ except ImportError:
     # Allow running without mimir installed if file is local
     sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
     from mimir.model_utils import resize_esm3_tokens
+
+
+def save_vocab(directory: str, targets: set) -> None:
+    """Save the target vocabulary to a JSON file in the specified directory.
+    
+    Args:
+        directory: Path to the checkpoint directory.
+        targets: Set of target identifiers used during training.
+    """
+    vocab_path = os.path.join(directory, "vocab.json")
+    # Sort targets to match tokenizer's internal order for determinism.
+    sorted_targets = sorted(list(targets))
+    with open(vocab_path, "w") as f:
+        json.dump(sorted_targets, f, indent=2)
+
 
 def train(args):
     """
@@ -322,11 +338,11 @@ def train(args):
         
         # Save Checkpoints
         # ----------------
-        
         # 1. Save Last Model (Always overwrites to keep latest state)
         last_path = "checkpoints/last_model"
         os.makedirs(last_path, exist_ok=True)
         model.save_pretrained(last_path)
+        save_vocab(last_path, targets)
         
         # 2. Save Best Model (Only if loss improves)
         if avg_true_loss < best_loss:
@@ -334,6 +350,7 @@ def train(args):
             best_path = "checkpoints/best_model"
             os.makedirs(best_path, exist_ok=True)
             model.save_pretrained(best_path)
+            save_vocab(best_path, targets)
             print(f"New Best Model! (Loss: {best_loss:.4f}). Saved to {best_path}")
         else:
             print(f"Saved latest model to {last_path}")
