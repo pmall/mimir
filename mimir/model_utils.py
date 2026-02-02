@@ -33,13 +33,6 @@ def resize_esm3_tokens(model: ESM3, new_vocab_size: int):
         
     current_vocab_size = model.encoder.sequence_embed.num_embeddings
     
-    if new_vocab_size < current_vocab_size:
-        raise ValueError(f"New vocab size ({new_vocab_size}) cannot be smaller than current ({current_vocab_size})")
-        
-    if new_vocab_size == current_vocab_size:
-        print(f"Vocab size is already {new_vocab_size}. No resizing needed.")
-        return
-
     print(f"Resizing ESM-3 embeddings from {current_vocab_size} to {new_vocab_size}...")
 
     # 2. Resize Encoder Embeddings (Input)
