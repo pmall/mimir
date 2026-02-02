@@ -4,37 +4,37 @@
 
 By leveraging the generative capabilities of **ESM-3**, MÍMIR outputs novel peptide sequences (< 20 amino acids) conditioned to bind specific human protein targets. It transforms the problem of finding a binder from a random search into a targeted generation task.
 
-## The Concept
+## Core Concepts
 
 Finding effective peptide binders for specific protein targets is a challenge of **combinatorial biology**. The number of possible peptide sequences is astronomical (20^sequence_length), making random screening inefficient.
 
 **MÍMIR** solves this by treating biology as a language.
 
-### 1. The Foundation: ESM-3
+### 1. Foundation: ESM-3
 
 We leverage **ESM-3**, a "Large Protein Model" trained on billions of evolutionary sequences. ESM-3 has already mastered the grammar of protein biology—it knows which amino acid sequences are stable, valid, and evolutionarily plausible. We don't need to teach it how to "be a peptide"; it already knows.
 
-### 2. The Conditioning: Dealing with "Who?" (Conditioned Generation)
+### 2. Conditioning: Target Tokens
 
 The core innovation is **Target Conditioning**. ESM-3 knows how to generate valid biology, but it doesn't naturally know how to generate a binder for _your_ specific target (e.g., P53 or HER2).
 
 To bridge this gap, we introduce **Target Tokens**:
 
-- We assign a unique token (e.g., `<TARGET_P53>`) to each target protein.
+- We assign a unique token (e.g., `<TARGET_P04637>`) to each target protein (identified by UniProt Accession).
 - We train the model on sequences known to bind to that target.
-- **The Result**: The model learns a **latent profile** of binding preferences for that specific target. It learns that `<TARGET_P53>` requires a specific hydrophobic motif, while `<TARGET_HER2>` needs a rigid charged loop.
+- **The Result**: The model learns a **latent profile** of binding preferences for that specific target. It learns that `<TARGET_P04637>` requires a specific hydrophobic motif, while `<TARGET_P04626>` needs a rigid charged loop.
 
-### 3. The Strategy: "Steering the Giant"
+### 3. Adaptation: LoRA
 
 We don't train a model from scratch. We use **LoRA (Low-Rank Adaptation)** to slightly adjust the attention mechanisms of ESM-3. This "steers" the massive pre-existing knowledge of the model toward our specific task.
 
-Effectively, we turn a general-purpose "Protein Generator" into a specialized "Peptide Binder Generator" that takes a Target ID as input and "dreams" a compatible binding sequence.
+Effectively, we turn a general-purpose "Protein Generator" into a specialized "Peptide Binder Generator" that takes a Target Token as input and "dreams" a compatible binding sequence.
 
-### 4. Implementation Details
+### 4. Training: Masked Language Modeling
 
 We implement this using a **Masked Language Modeling (MLM)** objective, heavily adapted for generation:
 
-1.  **Target Conditioning**:
+1.  **Target Anchoring**:
     - Every sequence is permanently anchored with its target ID: `[TARGET_ID] [BOS] [SEQUENCE...] [EOS]`.
     - This token is never masked, serving as the "prompt" for the generation.
 
@@ -47,8 +47,17 @@ We implement this using a **Masked Language Modeling (MLM)** objective, heavily 
     - **Why?** To generate a new peptide, the model must be able to hallucinate valid structures from almost nothing. High masking rates force it to learn global structural dependencies rather than just local sequence repair.
     - **Masking Boost**: A custom loss function (`Boost = 1.0 + 0.5 * log(N_masks + 1)`) creates a curriculum where the model is rewarded exponentially more for solving difficult, heavily masked scenarios.
 
-4.  **Smart Batching**:
-    - We use a `LengthGroupedSampler` to group sequences of similar lengths. This creates efficient, dense batches that maximize GPU throughput (essential for training on sequences up to 512aa).
+### 5. Inference: Parallel Iterative Decoding
+
+Unlike standard language models (like GPT) that generate text left-to-right, MÍMIR uses **Parallel Iterative Decoding** (inspired by MaskGit) to generate peptides. This is more akin to sculpting than writing:
+
+1.  **The Blank Slate**: We start with a fully masked sequence anchored by the target: `[TARGET_ID] [MASK] [MASK] [MASK] [MASK]`.
+2.  **Global Vision**: The model looks at the _entire_ blank canvas and predicts possibilities for every position simultaneously.
+3.  **Confident Anchoring**: We don't just pick the next word. We pick the **most confident residues** anywhere in the sequence—maybe a critical Arginine at position 3 and a Tryptophan at position 9 that are essential for binding.
+4.  **Refinement**: We "lock in" these high-confidence anchors and re-mask the rest. In the next step, the model fills in the gaps _conditioned_ on these anchors.
+5.  **Convergence**: We repeat this process, gradually revealing the full peptide.
+
+**Why this matters**: Binding is a spatial, all-or-nothing property. A peptide needs its key interaction points to be practically perfect. This method allows the model to prioritize the critical "binding pharmacophore" first, and then build a supportive scaffold around it.
 
 ## Directory Structure
 
@@ -79,7 +88,7 @@ We implement this using a **Masked Language Modeling (MLM)** objective, heavily 
 
 This project uses `uv` for dependency management.
 
-1.  **Initialize environment**:
+1.  **Initialize Environment**:
 
     ```bash
     uv sync
@@ -94,7 +103,7 @@ This project uses `uv` for dependency management.
 
 ## Usage
 
-### 1. Generate Datasets
+### 1. Data Generation
 
 We generate two types of datasets:
 
@@ -106,7 +115,7 @@ uv run scripts/generate_peptide_dataset.py
 uv run scripts/generate_mapping_dataset.py
 ```
 
-### 2. Fine-tune ESM-3
+### 2. Training
 
 Train on the **Mapping Dataset** to learn general binding rules.
 
@@ -130,10 +139,39 @@ uv run scripts/train.py \
 - `--gradient_accumulation_steps`: Simulates a larger batch size (e.g., 4 \* 16 = 64 effective batch).
 - `--use_8bit_adam`: Saves optimizer memory, allowing larger batches/models.
 
-### 3. Estimate Training Resources
+### 3. Resource Estimation
 
 Check how long your training will take based on your specific dataset size and GPU.
 
 ```bash
 uv run scripts/estimate_training.py
 ```
+
+### 4. Generation
+
+Once the model is fine-tuned, you can generate novel peptide binders for your targets using the `scripts/sample_peptides.py` script.
+
+This script applies the **Parallel Iterative Decoding** strategy described in **Core Concepts §5**. It starts with a blank template and iteratively "sculpts" the peptide by unmasking the most confident tokens.
+
+```bash
+uv run scripts/sample_peptides.py \
+    --checkpoint_path checkpoints/checkpoint-100 \
+    --targets "P04637,P04626" \
+    --min_size 10 \
+    --max_size 20 \
+    --num_peptides 5 \
+    --temperature 1.0 \
+    --top_n 0.25
+```
+
+**Key Parameters:**
+
+- `--checkpoint_path`: Path to the directory containing the fine-tuned model checkpoint and `vocab.json`.
+- `--targets`: Comma-separated list of target UniProt Accessions (must exist in the training vocabulary).
+- `--min_size` / `--max_size`: Length range of peptides to generate (default: 10-20).
+- `--num_peptides`: Number of peptides to generate per target and per length (default: 1).
+- `--temperature`: Controls sampling randomness (default: 1.0).
+- `--top_n`: Controls the generation step size (default: 0.25).
+  - If `0 < n < 1` (e.g., `0.25`): Unmasks 25% of the remaining tokens per step.
+  - If `n >= 1` (e.g., `1`): Unmasks exactly `n` tokens per step.
+- `--device`: Device to run generation on (default: "cuda" if available, else "cpu").
