@@ -355,6 +355,14 @@ def train(args):
         else:
             print(f"Saved latest model to {last_path}")
 
+        # 3. Save Periodic Checkpoint
+        if (epoch + 1) % args.save_every_n_epochs == 0:
+            periodic_path = f"checkpoints/epoch_{epoch + 1}"
+            os.makedirs(periodic_path, exist_ok=True)
+            model.save_pretrained(periodic_path)
+            save_vocab(periodic_path, targets)
+            print(f"Saved periodic checkpoint to {periodic_path}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -370,6 +378,7 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients")
     parser.add_argument("--warmup_steps", type=int, default=100, help="Number of warmup steps for scheduler")
     parser.add_argument("--dataset", type=str, default="data/peptide_dataset.csv", help="Path to the training dataset CSV")
+    parser.add_argument("--save_every_n_epochs", type=int, default=10, help="Save a checkpoint every N epochs")
     args = parser.parse_args()
     
     train(args)
