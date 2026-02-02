@@ -1,21 +1,34 @@
-# Agent Guidelines for Mimir-v2
+# MÍMIR Agent Context
 
-This document outlines specific rules and guidelines that all agents must follow when working on the Mimir-v2 project.
+## 1. Project Mission
 
-## 1. Package Management & Execution
+**MÍMIR** is a generative biology framework designed to "dream" novel peptide binders for specific human proteins. We are not just predicting properties; we are generating **de novo biological matter** using **ESM-3**.
 
-- **Use `uv`**: This project uses the `uv` package manager for dependency resolution and script execution.
-- **Run with `uv run`**: ALWAYS use `uv run <command>` instead of invoking `python` or `pip` directly.
-  - Example: `uv run python scripts/train.py`
-  - Example: `uv run pytest`
-- **Do not use global python**: Avoid using the system python interpreter directly to ensure reproducibility and environment isolation.
+## 2. Technical Mental Model
 
-## 2. Code Style
+- **The Engine**: We fine-tune **ESM-3** using **LoRA**. We do not train from scratch.
+- **The Paradigm**: Use **Masked Language Modeling**, not Causal LM.
+  - _Wrong_: "Predict the next amino acid."
+  - _Right_: "Sculpt the sequence from noise (Parallel Iterative Decoding)."
+- **The Anchor**: Generation is **Target-Conditioned**. Every sequence starts with a `<TARGET_ID>` token (UniProt Accession), acting as the prompt that steers the model's latent space.
 
-- **Type Hints**: All new functions and classes must include Python type hints.
-- **Docstrings**: Include Google-style docstrings for all modules, classes, and functions.
+## 3. Operational Guidelines
 
-## 3. Training & Models
+### Environment
 
-- **ESM-3**: This project revolves around fine-tuning ESM-3. Ensure all model interactions are compatible with the ESM-3 architecture.
-- **Masked Diffusion**: We are using a Masked Diffusion approach (Masked Language Modeling) for generation, not standard Causal LM.
+- **Package Manager**: Strict usage of `uv`.
+- **Execution**: Always run via `uv run scripts/...`.
+
+### Code & Data
+
+- **Scripts**: We prefer standalone scripts in `scripts/` over complex monolithic package logic.
+- **Data flow**:
+  - `datasets/` generation -> `data/` (csv)
+  - `train.py` -> `checkpoints/`
+  - `sample_peptides.py` -> Generation
+
+### Code Style
+
+- **Type Hints**: Mandatory.
+- **Docstrings**: Google-style.
+- **Simplicity**: Prefer readable, explicit code over clever abstractions.
