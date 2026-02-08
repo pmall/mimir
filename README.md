@@ -2,6 +2,23 @@
 
 **MÍMIR** is a specialized framework for **de novo peptide design**.
 
+## Table of Contents
+
+- [Core Concepts](#core-concepts)
+  - [Foundation: ESM-3](#1-foundation-esm-3)
+  - [Conditioning: Target Tokens](#2-conditioning-target-tokens)
+  - [Adaptation: LoRA](#3-adaptation-lora)
+  - [Training: Masked Language Modeling](#4-training-masked-language-modeling)
+  - [Inference: Parallel Iterative Decoding](#5-inference-parallel-iterative-decoding)
+- [Directory Structure](#directory-structure)
+- [Setup](#setup)
+- [Usage](#usage)
+  - [Data Generation](#1-data-generation)
+  - [Training](#2-training)
+  - [Resource Estimation](#3-resource-estimation)
+  - [Generation](#4-generation)
+- [V2 Roadmap: Multi-Track Structure Conditioning](#v2-roadmap-multi-track-structure-conditioning)
+
 By leveraging the generative capabilities of **ESM-3**, MÍMIR outputs novel peptide sequences (< 20 amino acids) conditioned to bind specific human protein targets. It transforms the problem of finding a binder from a random search into a targeted generation task.
 
 ## Core Concepts
@@ -175,3 +192,20 @@ uv run scripts/sample_peptides.py \
   - If `0 < n < 1` (e.g., `0.25`): Unmasks 25% of the remaining tokens per step.
   - If `n >= 1` (e.g., `1`): Unmasks exactly `n` tokens per step.
 - `--device`: Device to run generation on (default: "cuda" if available, else "cpu").
+
+## V2 Roadmap: Multi-Track Structure Conditioning
+
+V1 operates on **sequence only**. V2 will leverage all **5 tracks** of ESM-3's multi-modal architecture to add structure information on top of sequence:
+
+| Track                         | Description                     |
+| ----------------------------- | ------------------------------- |
+| **Sequence**                  | Amino acid tokens               |
+| **Structure**                 | 3D backbone coordinates         |
+| **Secondary Structure (SS8)** | 8-class local structure         |
+| **SASA**                      | Solvent Accessible Surface Area |
+| **Function**                  | InterPro annotations            |
+
+### Key V2 Features
+
+1. **Target Fingerprinting**: Use the 5 tracks to compute multi-track fingerprints for any human protein target.
+2. **Structure-Informed Binding Sequences**: Add structure information to binding sequences during training and generation.
