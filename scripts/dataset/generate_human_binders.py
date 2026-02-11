@@ -5,22 +5,29 @@ Extracts human binders from human-human (HH) interactions.
 Small proteins with no mapping are considered as binding sequences.
 
 Usage:
-    uv run python -m scripts.dataset.generate_human_binders [--verbose] [--min-length 4] [--max-length 512]
+    uv run python -m scripts.dataset.generate_human_binders [--verbose] [--min-length 4] [--max-length 512] [--output PATH]
 """
 
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 
-from .utils import (
-    get_db_connection,
-    extract_binders_from_mapping,
+from scripts.dataset.utils import (
     extract_binder_from_empty_mapping,
+    extract_binders_from_mapping,
+    generate_structure_id,
+    get_db_connection,
 )
 
 
-def generate_human_binders(min_len: int = 4, max_len: int = 512, verbose: bool = False) -> None:
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def generate_human_binders(min_len: int = 4, max_len: int = 512, verbose: bool = False, output: Path | None = None) -> None:
     """Extract human binders from HH interactions and write to CSV.
 
     This function fetches human-human interactions from the database, filters them
@@ -30,6 +37,7 @@ def generate_human_binders(min_len: int = 4, max_len: int = 512, verbose: bool =
         min_len: Minimum sequence length (inclusive).
         max_len: Maximum sequence length (inclusive).
         verbose: Whether to print progress and statistics to stderr.
+        output: Output CSV path. Defaults to data/run78-v2/human_binders.csv.
     """
     conn = get_db_connection()
     try:
@@ -102,44 +110,63 @@ def generate_human_binders(min_len: int = 4, max_len: int = 512, verbose: bool =
                     source_acc, prot_start, prot_stop, occ_start, occ_stop, seq = binder_data
                     associations.add((accession1, source_acc, prot_start, prot_stop, occ_start, occ_stop, seq))
 
-        # 3. Write Output
-        # Calculate stats
-        # a = (target, source_acc, prot_start, prot_stop, occ_start, occ_stop, seq)
-        unique_targets = {a[0] for a in associations}
-        unique_sources = {(a[1], a[2], a[3]) for a in associations}
-        unique_binders = {(a[1], a[2], a[3], a[4], a[5], a[6]) for a in associations}
-        unique_sequences = {a[6] for a in associations}
+        # 3. Process into unified format
+        # Group by (target, sequence)
+        grouped: dict[tuple[str, str], list[tuple]] = {}
+        seen_ids = set()
+
+        for assoc in associations:
+            # assoc: (target, source_acc, prot_start, prot_stop, occ_start, occ_stop, sequence)
+            target = assoc[0]
+            sequence = assoc[6]
+            key = (target, sequence)
+            grouped.setdefault(key, []).append(assoc)
+
+        final_rows: list[dict] = []
+        for (target, sequence), group in grouped.items():
+            # Generate deterministic structure ID from target + sequence
+            struct_id = generate_structure_id("H:", target, sequence)
+            
+            if struct_id in seen_ids:
+                raise ValueError(f"Collision detected! Structure ID {struct_id} already exists (Target: {target}, Seq: {sequence})")
+            seen_ids.add(struct_id)
+            
+            # Build sources list
+            sources = []
+            for item in group:
+                # item: (target, source_acc, prot_start, prot_stop, occ_start, occ_stop, sequence)
+                sources.append({
+                    "uniprot": item[1],
+                    "occ_start": item[4],
+                    "occ_stop": item[5],
+                })
+                
+            final_rows.append({
+                "type": "HH",
+                "target": target,
+                "sequence": sequence,
+                "structure_id": struct_id,
+                "sources": json.dumps(sources),
+            })
 
         if verbose:
             print(f"Processed {rows_processed} HH rows", file=sys.stderr)
-            print(f"  Associations: {len(associations)}", file=sys.stderr)
-            print(f"  Unique binders: {len(unique_binders)}", file=sys.stderr)
-            print(f"  Unique sequences: {len(unique_sequences)}", file=sys.stderr)
-            print(f"  Unique sources: {len(unique_sources)}", file=sys.stderr)
-            print(f"  Unique human targets: {len(unique_targets)}", file=sys.stderr)
+            print(f"  Raw associations: {len(associations)}", file=sys.stderr)
+            print(f"  Unique (target, sequence) pairs: {len(final_rows)}", file=sys.stderr)
 
-        # Write output
-        output_dir = Path(__file__).parent.parent.parent / "data" / "run78-v2"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / "human_binders.csv"
+        if output is None:
+            output = Path(__file__).parent.parent.parent / "data" / "run78-v2" / "human_binders.csv"
+        output.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(output_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "target",
-                "source_accession",
-                "protein_start",
-                "protein_stop",
-                "occ_start",
-                "occ_stop",
-                "sequence",
-            ])
-
-            for association in sorted(associations, key=lambda x: (x[0], x[1], x[2], x[3], x[4], x[5])):
-                writer.writerow(association)
+        with open(output, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["type", "target", "sequence", "structure_id", "sources"])
+            writer.writeheader()
+            
+            final_rows.sort(key=lambda x: (x["target"], x["sequence"]))
+            writer.writerows(final_rows)
 
         if verbose:
-            print(f"Written to {output_path}", file=sys.stderr)
+            print(f"Written to {output}", file=sys.stderr)
 
         cursor.close()
     finally:
@@ -151,6 +178,7 @@ if __name__ == "__main__":
     parser.add_argument("-v", "--verbose", action="store_true", help="Output statistics")
     parser.add_argument("--min-length", type=int, default=4, help="Minimum sequence length (default: 4)")
     parser.add_argument("--max-length", type=int, default=512, help="Maximum sequence length (default: 512)")
+    parser.add_argument("-o", "--output", type=Path, default=None, help="Output CSV path (default: data/run78-v2/human_binders.csv)")
     args = parser.parse_args()
 
-    generate_human_binders(min_len=args.min_length, max_len=args.max_length, verbose=args.verbose)
+    generate_human_binders(min_len=args.min_length, max_len=args.max_length, verbose=args.verbose, output=args.output)

@@ -2,6 +2,7 @@
 Shared utilities for v2 dataset generation.
 """
 
+import hashlib
 import os
 import psycopg2
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ def get_db_connection() -> psycopg2.extensions.connection:
     )
 
 
-def get_canonical_sequence(sequences: dict, accession: str, start: int, stop: int) -> str:
+def get_canonical_sequence(sequences: dict[str, str], accession: str, start: int, stop: int) -> str:
     """
     Get the canonical sequence sliced by start:stop coordinates.
     
@@ -42,10 +43,10 @@ def extract_binders_from_mapping(
     canonical_accession: str,
     canonical_start: int,
     canonical_stop: int,
-    sequences: dict,
+    sequences: dict[str, str],
     min_len: int = 4,
     max_len: int = 512,
-) -> list:
+) -> list[tuple]:
     """
     Extract binders from a mapping JSON array.
     
@@ -72,7 +73,8 @@ def extract_binders_from_mapping(
         return []
 
     binders = []
-    for item in mapping:
+    for item in mapping: # type: dict
+
         sequence = item.get("sequence", "")
         if not (min_len <= len(sequence) <= max_len):
             continue
@@ -111,7 +113,7 @@ def extract_binder_from_empty_mapping(
     canonical_accession: str,
     canonical_start: int,
     canonical_stop: int,
-    sequences: dict,
+    sequences: dict[str, str],
     min_len: int = 4,
     max_len: int = 512,
 ) -> tuple | None:
@@ -145,3 +147,20 @@ def extract_binder_from_empty_mapping(
         len(sequence),
         sequence,
     )
+
+
+def generate_structure_id(prefix: str, target: str, sequence: str) -> str:
+    """Generate a deterministic ID (e.g. H:A1B2C3D4) from the target and sequence.
+
+    Args:
+        prefix: Prefix for the ID (e.g. "H:" or "V:")
+        target: The target accession
+        sequence: The peptide sequence (will be upper-cased and stripped)
+
+    Returns:
+        Deterministic ID string.
+    """
+    normalized_data = f"{target}_{sequence.strip()}".upper()
+    seq_hash = hashlib.sha256(normalized_data.encode("utf-8")).hexdigest()
+    return f"{prefix}{seq_hash[:12].upper()}"
+
