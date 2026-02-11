@@ -4,6 +4,8 @@ Shared utilities for v2 dataset generation.
 
 import hashlib
 import os
+from pathlib import Path
+
 import psycopg2
 from dotenv import load_dotenv
 
@@ -21,16 +23,18 @@ def get_db_connection() -> psycopg2.extensions.connection:
     )
 
 
-def get_canonical_sequence(sequences: dict[str, str], accession: str, start: int, stop: int) -> str:
+def get_canonical_sequence(
+    sequences: dict[str, str], accession: str, start: int, stop: int
+) -> str:
     """
     Get the canonical sequence sliced by start:stop coordinates.
-    
+
     Args:
         sequences: Dict of accession -> sequence from proteins.sequences
         accession: The canonical accession
         start: Start coordinate (1-indexed)
         stop: Stop coordinate (1-indexed, inclusive)
-    
+
     Returns:
         The sliced canonical sequence
     """
@@ -49,14 +53,14 @@ def extract_binders_from_mapping(
 ) -> list[tuple]:
     """
     Extract binders from a mapping JSON array.
-    
+
     Only considers canonical sequences, ignores isoforms.
-    
+
     Filters:
     - Sequence length must be between min_len and max_len
     - Only single occurrence on canonical (skip multi-occurrence)
     - Ignores isoforms entirely
-    
+
     Args:
         mapping: The mapping JSON array
         canonical_accession: The canonical protein accession
@@ -65,7 +69,7 @@ def extract_binders_from_mapping(
         sequences: Dict of accession -> sequence from proteins.sequences
         min_len: Minimum sequence length (default 4)
         max_len: Maximum sequence length (default 512)
-    
+
     Returns:
         List of tuples: (source_accession, protein_start, protein_stop, occ_start, occ_stop, sequence)
     """
@@ -73,8 +77,7 @@ def extract_binders_from_mapping(
         return []
 
     binders = []
-    for item in mapping: # type: dict
-
+    for item in mapping:  # type: dict
         sequence = item.get("sequence", "")
         if not (min_len <= len(sequence) <= max_len):
             continue
@@ -82,11 +85,11 @@ def extract_binders_from_mapping(
         isoforms = item.get("isoforms", [])
         for isoform in isoforms:
             isoform_acc = isoform.get("accession", "")
-            
+
             # Only consider canonical, skip isoforms
             if isoform_acc != canonical_accession:
                 continue
-            
+
             occurrences = isoform.get("occurrences", [])
 
             # Skip if multiple occurrences
@@ -97,14 +100,16 @@ def extract_binders_from_mapping(
             occ_start = int(occ.get("start"))
             occ_stop = int(occ.get("stop"))
 
-            binders.append((
-                canonical_accession,
-                canonical_start,
-                canonical_stop,
-                occ_start,
-                occ_stop,
-                sequence,
-            ))
+            binders.append(
+                (
+                    canonical_accession,
+                    canonical_start,
+                    canonical_stop,
+                    occ_start,
+                    occ_stop,
+                    sequence,
+                )
+            )
 
     return binders
 
@@ -119,9 +124,9 @@ def extract_binder_from_empty_mapping(
 ) -> tuple | None:
     """
     Extract binder from canonical sequence when mapping is empty.
-    
+
     Only canonical sequences are considered (not isoforms).
-    
+
     Args:
         canonical_accession: The canonical protein accession
         canonical_start: Start coordinate of canonical
@@ -129,13 +134,15 @@ def extract_binder_from_empty_mapping(
         sequences: Dict of accession -> sequence from proteins.sequences
         min_len: Minimum sequence length (default 4)
         max_len: Maximum sequence length (default 512)
-    
+
     Returns:
         Tuple (source_accession, protein_start, protein_stop, occ_start, occ_stop, sequence)
         or None if length constraints not met
     """
-    sequence = get_canonical_sequence(sequences, canonical_accession, canonical_start, canonical_stop)
-    
+    sequence = get_canonical_sequence(
+        sequences, canonical_accession, canonical_start, canonical_stop
+    )
+
     if not (min_len <= len(sequence) <= max_len):
         return None
 
@@ -163,4 +170,6 @@ def generate_structure_id(prefix: str, target: str, sequence: str) -> str:
     normalized_data = f"{target}_{sequence.strip()}".upper()
     seq_hash = hashlib.sha256(normalized_data.encode("utf-8")).hexdigest()
     return f"{prefix}{seq_hash[:12].upper()}"
+
+
 
