@@ -9,22 +9,29 @@ human SwissProt targets and their binders (any species).
 Groups by (target, sequence) pair, outputting a unified schema with JSON sources.
 
 Usage:
-    uv run python -m scripts.dataset.generate_pdb_binders [--verbose] [--min-length 4] [--max-length 512] [--output PATH]
+    uv run python -m scripts.dataset.generate_pdb_binders \\
+        -o data/run78-v2/binders_lists/pdb_binders_96aa.csv \\
+        [--min-length 4] [--max-length 512] [--verbose]
 """
 
 import argparse
 import asyncio
 import csv
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-# ---------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# ---
 # Constants
-# ---------------------------------------------------------------------------
+# ---
 
 SEARCH_API_URL = "https://search.rcsb.org/rcsbsearch/v2/query"
 GRAPHQL_URL = "https://data.rcsb.org/graphql"
@@ -50,9 +57,9 @@ DEFAULT_METHOD_RANK = 99
 FALLBACK_RESOLUTION = 999.0
 
 
-# ---------------------------------------------------------------------------
+# ---
 # Search phase
-# ---------------------------------------------------------------------------
+# ---
 
 
 def build_search_query(start: int = 0) -> dict[str, Any]:
@@ -115,12 +122,11 @@ def build_search_query(start: int = 0) -> dict[str, Any]:
     }
 
 
-async def fetch_all_entry_ids(client: httpx.AsyncClient, verbose: bool = False) -> list[str]:
+async def fetch_all_entry_ids(client: httpx.AsyncClient) -> list[str]:
     """Fetch all PDB entry IDs matching the binary protein complex filter.
 
     Args:
         client: An httpx async client.
-        verbose: Whether to print progress.
 
     Returns:
         List of PDB entry IDs (e.g. ["1ABC", "2DEF", ...]).
@@ -137,8 +143,7 @@ async def fetch_all_entry_ids(client: httpx.AsyncClient, verbose: bool = False) 
 
         if total_count is None:
             total_count = data.get("total_count", 0)
-            if verbose:
-                print(f"Search API: {total_count} entries found", file=sys.stderr)
+            logger.info(f"Search API: {total_count} entries found")
 
         result_set = data.get("result_set", [])
         if not result_set:
@@ -154,9 +159,9 @@ async def fetch_all_entry_ids(client: httpx.AsyncClient, verbose: bool = False) 
     return entry_ids
 
 
-# ---------------------------------------------------------------------------
+# ---
 # GraphQL enrichment phase
-# ---------------------------------------------------------------------------
+# ---
 
 # Query entries with nested polymer entities. This gives us both:
 # - Entry-level: experimental method + resolution (for best-entry selection)
@@ -180,6 +185,7 @@ query($ids: [String!]!) {
       }
       rcsb_polymer_entity_container_identifiers {
         asym_ids
+        auth_asym_ids
         reference_sequence_identifiers {
           database_name
           database_accession
@@ -222,7 +228,7 @@ def parse_entity(entity: dict[str, Any]) -> dict[str, Any]:
             info["uniprot_accession"] = ref.get("database_accession")
             break
 
-    info["chain_ids"] = container_ids.get("asym_ids") or []
+    info["chain_ids"] = container_ids.get("auth_asym_ids") or container_ids.get("asym_ids") or []
 
     entity_poly = entity.get("entity_poly") or {}
     raw_seq = entity_poly.get("pdbx_seq_one_letter_code_can") or ""
@@ -283,9 +289,9 @@ async def fetch_entries_batch(
     return [parse_entry(e) for e in entries if e is not None]
 
 
-# ---------------------------------------------------------------------------
+# ---
 # Processing + Deduplication
-# ---------------------------------------------------------------------------
+# ---
 
 
 def extract_associations(
@@ -343,34 +349,30 @@ def extract_associations(
 
 
 
-# ---------------------------------------------------------------------------
+# ---
 # Main
-# ---------------------------------------------------------------------------
+# ---
 
 
-async def _run(min_len: int, max_len: int, verbose: bool, output: Path | None) -> None:
+async def _run(output: Path, min_len: int, max_len: int) -> None:
     """Async entry point for the PDB binder retrieval pipeline.
 
     Args:
+        output: Output CSV path.
         min_len: Minimum binder sequence length.
         max_len: Maximum binder sequence length.
-        verbose: Whether to print progress and statistics.
-        output: Output CSV path. Defaults to data/run78-v2/pdb_binders.csv.
     """
     async with httpx.AsyncClient() as client:
         # 1. Search
-        if verbose:
-            print(f"Searching for binary protein complexes ({min_len}-{max_len} aa)...", file=sys.stderr)
+        logger.info(f"Searching for binary protein complexes ({min_len}-{max_len} aa)...")
 
-        entry_ids = await fetch_all_entry_ids(client, verbose=verbose)
+        entry_ids = await fetch_all_entry_ids(client)
 
         if not entry_ids:
-            if verbose:
-                print("No entries found.", file=sys.stderr)
+            logger.info("No entries found.")
             return
 
-        if verbose:
-            print(f"Fetching {len(entry_ids)} entries via GraphQL...", file=sys.stderr)
+        logger.info(f"Fetching {len(entry_ids)} entries via GraphQL...")
 
         # 2. Batch fetch via GraphQL
         semaphore = asyncio.Semaphore(MAX_CONCURRENT)
@@ -392,24 +394,20 @@ async def _run(min_len: int, max_len: int, verbose: bool, output: Path | None) -
             entries = await coro
             all_entries.extend(entries)
             completed += 1
-            if verbose and completed % log_interval == 0:
+            if completed % log_interval == 0:
                 pct = completed * 100 // total_batches
-                print(f"  {pct}% ({len(all_entries)}/{len(entry_ids)})", file=sys.stderr)
+                logger.info(f"  {pct}% ({len(all_entries)}/{len(entry_ids)})")
 
-        if verbose:
-            print(f"  Done: {len(all_entries)} entries fetched", file=sys.stderr)
+        logger.info(f"  Done: {len(all_entries)} entries fetched")
 
         # 3. Extract associations
         all_associations: list[dict] = []
         for entry in all_entries:
             all_associations.extend(extract_associations(entry, min_len, max_len))
 
-        if verbose:
-            print(f"  Raw associations: {len(all_associations)}", file=sys.stderr)
+        logger.info(f"  Raw associations: {len(all_associations)}")
 
-        # 4. Deduplicate by (target, sequence) to create entry + sources list
-        # Key: (target, sequence)
-        # Value: list of associations (all sources)
+        # 4. Deduplicate by (target, sequence)
         grouped: dict[tuple[str, str], list[dict]] = {}
         for assoc in all_associations:
             key = (assoc["target"], assoc["sequence"])
@@ -418,7 +416,7 @@ async def _run(min_len: int, max_len: int, verbose: bool, output: Path | None) -
         # 5. Build final rows
         final_rows: list[dict] = []
         for (target, sequence), group in grouped.items():
-            # Sort group by best resolution to pick the representative structure ID
+            # Sort by best resolution to pick the representative structure
             group.sort(
                 key=lambda a: (
                     a["resolution"] if a["resolution"] is not None else FALLBACK_RESOLUTION,
@@ -426,52 +424,48 @@ async def _run(min_len: int, max_len: int, verbose: bool, output: Path | None) -
                 )
             )
             best_entry = group[0]
-            
-            # Build sources list
-            sources = []
-            for item in group:
-                sources.append({
+
+            sources = [
+                {
                     "pdb_id": item["pdb_id"],
                     "chain": item["binder_chain_ids"],
                     "resolution": item["resolution"],
                     "method": item["method"],
                     "organism": item["binder_organism"],
                     "entity_id": item["binder_entity_id"],
-                })
+                }
+                for item in group
+            ]
 
             final_rows.append({
                 "type": "PDB",
                 "target": target,
                 "sequence": sequence,
                 "structure_id": best_entry["pdb_id"],
+                "binder_id": f"{best_entry['pdb_id']}_{best_entry['binder_chain_ids'].split(',')[0]}",
                 "sources": json.dumps(sources),
             })
 
-        if verbose:
-            print(f"After grouping:", file=sys.stderr)
-            print(f"  Unique (target, sequence) pairs: {len(final_rows)}", file=sys.stderr)
+        logger.info(f"After grouping: {len(final_rows)} unique (target, sequence) pairs")
 
         # 6. Write output
-        if output is None:
-            output = Path(__file__).parent.parent.parent / "data" / "run78-v2" / "pdb_binders.csv"
         output.parent.mkdir(parents=True, exist_ok=True)
 
         with open(output, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["type", "target", "sequence", "structure_id", "sources"])
+            writer = csv.DictWriter(
+                f, fieldnames=["type", "target", "sequence", "structure_id", "binder_id", "sources"]
+            )
             writer.writeheader()
-            
             final_rows.sort(key=lambda x: (x["target"], x["sequence"]))
             writer.writerows(final_rows)
 
-        if verbose:
-            print(f"Written to {output}", file=sys.stderr)
+        logger.info(f"Written to {output}")
 
 
 def generate_pdb_binders(
+    output: Path,
     min_len: int = 4,
     max_len: int = 512,
-    verbose: bool = False,
-    output: Path | None = None,
 ) -> None:
     """Query RCSB PDB for binary protein complexes and extract binder sequences.
 
@@ -480,25 +474,53 @@ def generate_pdb_binders(
     Deduplicates by (target, sequence), storing all sources in a JSON array.
 
     Args:
+        output: Output CSV path.
         min_len: Minimum binder sequence length (inclusive).
         max_len: Maximum binder sequence length (inclusive).
-        verbose: Whether to print progress and statistics to stderr.
-        output: Output CSV path. Defaults to data/run78-v2/pdb_binders.csv.
     """
-    asyncio.run(_run(min_len, max_len, verbose, output))
+    asyncio.run(_run(output, min_len, max_len))
+
+
+def main() -> None:
+    """Parse CLI arguments and generate the PDB binders CSV dataset."""
+    parser = argparse.ArgumentParser(description="Generate PDB Binders Dataset")
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        required=True,
+        help="Output CSV path",
+    )
+    parser.add_argument(
+        "--min-length",
+        type=int,
+        default=4,
+        help="Minimum binder sequence length (default: 4)",
+    )
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=512,
+        help="Maximum binder sequence length (default: 512)",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Log progress and statistics",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    generate_pdb_binders(
+        output=args.output,
+        min_len=args.min_length,
+        max_len=args.max_length,
+    )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate PDB Binders Dataset")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Output statistics")
-    parser.add_argument("--min-length", type=int, default=4, help="Minimum sequence length (default: 4)")
-    parser.add_argument("--max-length", type=int, default=512, help="Maximum sequence length (default: 512)")
-    parser.add_argument("-o", "--output", type=Path, default=None, help="Output CSV path (default: data/run78-v2/pdb_binders.csv)")
-    args = parser.parse_args()
-
-    generate_pdb_binders(
-        min_len=args.min_length,
-        max_len=args.max_length,
-        verbose=args.verbose,
-        output=args.output,
-    )
+    main()

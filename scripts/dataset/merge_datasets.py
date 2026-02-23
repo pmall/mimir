@@ -6,27 +6,31 @@ structure_id, sources). Deduplicates on (target, sequence) pairs, with earlier
 files taking priority over later ones.
 
 Usage:
-    uv run python -m scripts.dataset.merge_datasets data/run78-v2/pdb_binders.csv data/run78-v2/human_binders.csv -o data/run78-v2/merged.csv
+    uv run python -m scripts.dataset.merge_datasets \\
+        data/run78-v2/pdb_binders.csv data/run78-v2/human_binders.csv \\
+        -o data/run78-v2/merged.csv
 """
 
 import argparse
 import csv
 import json
+import logging
 import sys
 from pathlib import Path
 
-FIELDNAMES = ["type", "target", "sequence", "structure_id", "sources"]
+logger = logging.getLogger(__name__)
+
+FIELDNAMES = ["type", "target", "sequence", "structure_id", "binder_id", "sources"]
 
 
-# ---------------------------------------------------------------------------
+# ---
 # Main
-# ---------------------------------------------------------------------------
+# ---
 
 
 def merge_datasets(
     input_files: list[Path],
     output: Path,
-    verbose: bool = False,
 ) -> None:
     """Merge multiple binder CSVs with first-file-priority deduplication.
 
@@ -37,7 +41,7 @@ def merge_datasets(
     Args:
         input_files: Ordered list of input CSV paths.
         output: Output CSV path.
-        verbose: Whether to print statistics to stderr.
+        verbose: Whether to log statistics.
     """
     merged: dict[tuple[str, str], dict] = {}
 
@@ -58,12 +62,11 @@ def merge_datasets(
                     merged[key]["sources"].extend(sources)
                     extended += 1
 
-        if verbose:
-            print(f"{path}: {added} new, {extended} sources merged", file=sys.stderr)
+        logger.info(f"{path}: {added} new, {extended} sources merged")
 
     rows = list(merged.values())
-    rows.sort(key=lambda x: (x["target"], x["sequence"]))
     for row in rows:
+        row["sources"].sort(key=lambda x: json.dumps(x, sort_keys=True))
         row["sources"] = json.dumps(row["sources"])
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -72,15 +75,46 @@ def merge_datasets(
         writer.writeheader()
         writer.writerows(rows)
 
-    if verbose:
-        print(f"Total: {len(rows)} unique (target, sequence) pairs written to {output}", file=sys.stderr)
+    logger.info(f"Total: {len(rows)} unique (target, sequence) pairs written to {output}")
+
+
+def main() -> None:
+    """Parse CLI arguments and run the dataset merge utility."""
+    parser = argparse.ArgumentParser(
+        description="Merge binder datasets with priority-based deduplication"
+    )
+    parser.add_argument(
+        "inputs",
+        nargs="+",
+        type=Path,
+        help="Input CSV files (earlier files take priority)",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        required=True,
+        help="Output CSV path",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Log progress and statistics",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    for path in args.inputs:
+        if not path.exists():
+            logger.error(f"Input file not found: {path}")
+            sys.exit(1)
+
+    merge_datasets(input_files=args.inputs, output=args.output)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Merge binder datasets with priority-based deduplication")
-    parser.add_argument("inputs", nargs="+", type=Path, help="Input CSV files (earlier files take priority)")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Output statistics")
-    parser.add_argument("-o", "--output", type=Path, required=True, help="Output CSV path")
-    args = parser.parse_args()
-
-    merge_datasets(input_files=args.inputs, output=args.output, verbose=args.verbose)
+    main()

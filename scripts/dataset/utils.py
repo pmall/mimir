@@ -9,11 +9,14 @@ from pathlib import Path
 import psycopg2
 from dotenv import load_dotenv
 
-load_dotenv()
+# ---
+# Database
+# ---
 
 
 def get_db_connection() -> psycopg2.extensions.connection:
     """Create a PostgreSQL database connection using environment variables."""
+    load_dotenv()
     return psycopg2.connect(
         host=os.getenv("POSTGRES_HOST"),
         port=os.getenv("POSTGRES_PORT"),
@@ -21,6 +24,11 @@ def get_db_connection() -> psycopg2.extensions.connection:
         user=os.getenv("POSTGRES_USER"),
         password=os.getenv("POSTGRES_PASSWORD"),
     )
+
+
+# ---
+# Sequences
+# ---
 
 
 def get_canonical_sequence(
@@ -40,6 +48,11 @@ def get_canonical_sequence(
     """
     full_seq = sequences.get(accession, "")
     return full_seq[start - 1 : stop]
+
+
+# ---
+# Binders
+# ---
 
 
 def extract_binders_from_mapping(
@@ -77,7 +90,7 @@ def extract_binders_from_mapping(
         return []
 
     binders = []
-    for item in mapping:  # type: dict
+    for item in mapping:
         sequence = item.get("sequence", "")
         if not (min_len <= len(sequence) <= max_len):
             continue
@@ -156,6 +169,11 @@ def extract_binder_from_empty_mapping(
     )
 
 
+# ---
+# Features
+# ---
+
+
 def generate_structure_id(prefix: str, target: str, sequence: str) -> str:
     """Generate a deterministic ID (e.g. H:A1B2C3D4) from the target and sequence.
 
@@ -170,6 +188,3 @@ def generate_structure_id(prefix: str, target: str, sequence: str) -> str:
     normalized_data = f"{target}_{sequence.strip()}".upper()
     seq_hash = hashlib.sha256(normalized_data.encode("utf-8")).hexdigest()
     return f"{prefix}{seq_hash[:12].upper()}"
-
-
-

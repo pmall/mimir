@@ -29,6 +29,59 @@
 
 ### Code Style
 
-- **Type Hints**: Mandatory.
-- **Docstrings**: Google-style.
+- **Type Hints**: Mandatory on all functions (params + return).
+- **Docstrings**: Google-style, on every public function/class.
 - **Simplicity**: Prefer readable, explicit code over clever abstractions.
+
+### Logging
+
+- **Module**: Always use Python's `logging` module, never `print()`.
+- **Destination**: Log to `sys.stdout` via `logging.StreamHandler(sys.stdout)`.
+- **Format**: `"%(asctime)s - %(levelname)s - %(message)s"`.
+- **Setup**: Call `logging.basicConfig(...)` inside `main()` after parsing args, never at module level (prevents third-party library noise at import time).
+- **Verbose flag**: Pass `level=logging.INFO if args.verbose else logging.WARNING` directly to `basicConfig`. Do not use `logging.disable()`.
+- **Levels**: Use `logger.error()` for failures, `logger.warning()` for recoverable issues, `logger.info()` for progress. Never duplicate the same message at two levels.
+- **Noisy libraries**: Silence with `logging.getLogger("httpx").setLevel(logging.WARNING)` etc. at module level.
+
+### CLI Arguments
+
+- **Naming**: Use kebab-case (`--input-csv`, `--min-length`).
+- **Input/Output**: Always `required=True`, never provide default paths. Use `-o` shorthand for `--output`.
+- **Verbose**: `-v` / `--verbose`, `action="store_true"`.
+- **Defaults for non-IO params**: Document in help string (e.g. `"default: 4"`).
+
+### Function Signatures
+
+- **Required params first**: `output: Path` before optional params like `min_len: int = 4`.
+- **Match CLI names**: CLI `--min-length` → function param `min_len`.
+- **Execution pattern**: `main()` must only contain argparse, `basicConfig`, input validation, and a single call to the business logic function. All processing logic belongs in a separate function with proper type hints and docstrings.
+- **String encoding**: Use `utf-8` for all `.encode()` calls (LMDB keys, hashing, etc.).
+
+### Async Scripts
+
+- **3-Layer Pattern**: Async scripts must follow a 3-layer pattern: `async def _run(...)` for async logic, a public sync wrapper calling `asyncio.run(_run(...))`, and `main()` for CLI parsing.
+
+### File & Resource Operations
+
+- **LMDB**: Key encoding must be `utf-8`. Define map size as a module-level constant `LMDB_MAP_SIZE`. Read-only opens use `readonly=True, lock=False`.
+- **Input validation**: Scripts with file path inputs must validate existence early in `main()` using `logger.error()` + `sys.exit(1)`.
+- **Multiprocessing**: Use `spawn` context. Worker globals in `_UPPER_SNAKE`. Set `torch.set_num_threads(1)` in worker init.
+- **Warnings**: Suppress third-party warnings at module level with `warnings.filterwarnings()`, never inline inside functions.
+
+### Imports
+
+- **Order**: stdlib → third-party → local (`from mimir...`, `from scripts...`).
+- **No inline imports**: All imports at module top level.
+- **Style**: Prefer `from X import Y` over `import X as Y`.
+
+### Comments & Structure
+
+- **Section markers**: Use `# ---...--- ` dividers with section names (e.g. `# Constants`, `# Main`).
+- **No redundant comments**: Don't comment what the code already says.
+- **No old-style type comments**: Use proper type hints, not `# type: dict`.
+- **Trailing whitespace**: No trailing blank lines at end of file.
+
+### Default Values
+
+- **Input/output paths**: Never have defaults. Always `required=True`.
+- **Processing params**: Sensible defaults with documented values (e.g. `min_len=4`, `chunk_size=500`).
