@@ -58,10 +58,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .plddt-cell { height: 10vh; width: 100%; display: flex; align-items: flex-start; justify-content: center; padding-top: 8px; }
         .plddt-bar { width: 14px; border-radius: 0 0 3px 3px; }
         
-        /* Threshold Lines */
-        .lines-container { position: absolute; top: 0; bottom: 0; left: 20px; right: 20px; z-index: 1; pointer-events: none; display: flex; flex-direction: column; justify-content: center; }
-        .thresh-rsasa { width: 100%; height: 10vh; border-bottom: 1px dashed #94a3b8; opacity: 0.5; position: absolute; top: calc(50% - 13px - 10vh); transform: translateY(85%); } /* y=0.15 */
-        .thresh-plddt { width: 100%; height: 10vh; border-top: 1px solid #ef4444; opacity: 0.5; position: absolute; top: calc(50% + 13px); transform: translateY(30%); } /* y=70 */
+        /* Threshold Lines - we anchor relative to the full wrapper */
+        .lines-container { position: absolute; top: 0; bottom: 0; left: 0; right: 0; z-index: 1; pointer-events: none; }
+        .thresh-rsasa { position: absolute; height: 1px; width: 100%; border-top: 1px dashed #94a3b8; opacity: 0.5; left: 0; bottom: calc(50% + 14px + 1.5vh); } /* +14px for half sequence seq-cell box + 1.5vh representing 0.15 * 10vh max rsasa */
+        .thresh-plddt { position: absolute; height: 1px; width: 100%; border-top: 1px solid #ef4444; opacity: 0.5; left: 0; top: calc(50% + 14px + 7vh); } /* top down, +14px for half sequence box + 7vh representing (100-70)=30 down but plddt goes 0..100 mapping to 10vh height, so 70 is 7vh down from the center start point */
         
         /* Masked IN */
         .col.in .rsasa-bar { background: #0ea5e9; }
