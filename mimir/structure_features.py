@@ -333,7 +333,6 @@ class FingerprintFeatures:
     def __init__(
         self,
         entry_id: str,
-        plddt: float,
         sequence: str,
         structure_tokens: list[int],
         sasa: list[float],
@@ -341,7 +340,6 @@ class FingerprintFeatures:
         position_ids: list[int],
     ):
         self.entry_id = entry_id
-        self.plddt = plddt
         self.sequence = sequence
         self.structure_tokens = structure_tokens
         self.sasa = sasa
@@ -351,7 +349,6 @@ class FingerprintFeatures:
     def to_dict(self) -> dict:
         return {
             "id": self.entry_id,
-            "plddt": self.plddt,
             "sequence": self.sequence,
             "structure_tokens": self.structure_tokens,
             "sasa": self.sasa,
@@ -363,7 +360,6 @@ class FingerprintFeatures:
     def from_dict(cls, data: dict) -> "FingerprintFeatures":
         return cls(
             entry_id=data.get("id", ""),
-            plddt=data.get("plddt", 0.0),
             sequence=data.get("sequence", ""),
             structure_tokens=data.get("structure_tokens", []),
             sasa=data.get("sasa", []),
