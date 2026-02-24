@@ -22,38 +22,13 @@ import msgpack
 import numpy as np
 from tqdm import tqdm
 
-from mimir.structure_features import FingerprintFeatures, TargetFeatures
+from mimir.structure_features import FingerprintFeatures, TargetFeatures, get_fingerprint_mask
 
 # ---
 # Constants
 # ---
 
 LMDB_MAP_SIZE = 10 * 1024**3  # 10 GB virtual (sparse on Linux, no pre-alloc)
-MIN_FINGERPRINT_LEN = 15
-
-# Tien et al. 2013 Maximum allowed SASA (Theoretical max in Gly-X-Gly). Used for rSASA.
-MAX_SASA_REFERENCE = {
-    "A": 121.0,
-    "R": 265.0,
-    "N": 187.0,
-    "D": 187.0,
-    "C": 148.0,
-    "Q": 214.0,
-    "E": 214.0,
-    "G": 97.0,
-    "H": 216.0,
-    "I": 195.0,
-    "L": 191.0,
-    "K": 230.0,
-    "M": 203.0,
-    "F": 228.0,
-    "P": 154.0,
-    "S": 143.0,
-    "T": 163.0,
-    "W": 264.0,
-    "Y": 255.0,
-    "V": 165.0,
-}
 
 
 logger = logging.getLogger(__name__)
@@ -62,14 +37,6 @@ logger = logging.getLogger(__name__)
 # ---
 # Feature extraction
 # ---
-
-def compute_rsasa(sequence: str, sasa: list[float]) -> np.ndarray:
-    """Compute Relative SASA arrays safely. Handle unknown residues by assuming minimum surface."""
-    rsasa = np.zeros(len(sequence), dtype=np.float32)
-    for i, (res, abs_sasa) in enumerate(zip(sequence, sasa)):
-        max_sasa = MAX_SASA_REFERENCE.get(res.upper(), 1.0) # avoid division by 0
-        rsasa[i] = abs_sasa / max_sasa
-    return rsasa
 
 
 def extract_fingerprint(
@@ -91,39 +58,23 @@ def extract_fingerprint(
     plddt_np = np.array(target.residue_plddt)
     pos_np = np.array(target.position_ids)
 
-    # 1. Compute rSASA
-    rsasa_np = compute_rsasa(target.sequence, target.sasa)
+    # 1. Get the shared centralized boolean mask
+    mask = get_fingerprint_mask(
+        sequence=target.sequence,
+        sasa=target.sasa,
+        plddt=target.residue_plddt,
+        max_len=max_len,
+    )
 
-    # 2. Boolean Mask: pLDDT >= 70 AND rSASA >= 0.15
-    mask = (plddt_np >= 70.0) & (rsasa_np >= 0.15)
+    if mask is None:
+        return None
     
-    # 3. Apply mask to all 5 synchronized tracks
+    # 2. Apply mask to all 5 synchronized tracks
     f_seq = seq_np[mask]
     f_tokens = tokens_np[mask]
     f_sasa = sasa_np[mask]
     f_plddt = plddt_np[mask]
     f_pos = pos_np[mask]
-    f_rsasa = rsasa_np[mask]
-
-    # 4. Global Length Filter Check
-    current_length = len(f_seq)
-    if current_length < MIN_FINGERPRINT_LEN:
-        return None
-
-    # 5. Length Truncation (Top rSASA Selection)
-    if current_length > max_len:
-        # Get indices of top `max_len` rsasa values
-        # Note: np.argsort is ascending, so we take the last `max_len` elements
-        top_indices = np.argsort(f_rsasa)[-max_len:]
-        
-        # Sort these indices to maintain chronological order
-        chronological_indices = np.sort(top_indices)
-
-        f_seq = f_seq[chronological_indices]
-        f_tokens = f_tokens[chronological_indices]
-        f_sasa = f_sasa[chronological_indices]
-        f_plddt = f_plddt[chronological_indices]
-        f_pos = f_pos[chronological_indices]
 
     fingerprint = FingerprintFeatures(
         entry_id=target.entry_id,

@@ -246,6 +246,81 @@ def parse_mmcif_file(file_path: Path, compressed: bool = False, chain_id: str | 
     return parse_mmcif_bytes(content, compressed=compressed, chain_id=chain_id)
 
 
+MIN_FINGERPRINT_LEN = 15
+
+# Tien et al. 2013 Maximum allowed SASA (Theoretical max in Gly-X-Gly). Used for rSASA.
+MAX_SASA_REFERENCE = {
+    "A": 121.0,
+    "R": 265.0,
+    "N": 187.0,
+    "D": 187.0,
+    "C": 148.0,
+    "Q": 214.0,
+    "E": 214.0,
+    "G": 97.0,
+    "H": 216.0,
+    "I": 195.0,
+    "L": 191.0,
+    "K": 230.0,
+    "M": 203.0,
+    "F": 228.0,
+    "P": 154.0,
+    "S": 143.0,
+    "T": 163.0,
+    "W": 264.0,
+    "Y": 255.0,
+    "V": 165.0,
+}
+
+
+def compute_rsasa(sequence: str, sasa: list[float] | np.ndarray) -> np.ndarray:
+    """Compute Relative SASA arrays safely. Handle unknown residues by assuming minimum surface."""
+    rsasa = np.zeros(len(sequence), dtype=np.float32)
+    for i, (res, abs_sasa) in enumerate(zip(sequence, sasa)):
+        max_sasa = MAX_SASA_REFERENCE.get(res.upper(), 1.0)  # avoid division by 0
+        rsasa[i] = abs_sasa / max_sasa
+    return rsasa
+
+
+def get_fingerprint_mask(
+    sequence: str,
+    sasa: list[float] | np.ndarray,
+    plddt: list[float] | np.ndarray,
+    max_len: int = 157,
+) -> np.ndarray | None:
+    """Returns a boolean mask of the kept positions, or None if skipped by min-length.
+    
+    Filters positions based on pLDDT >= 70.0 and rSASA >= 0.15.
+    If valid positions > max_len, keeps only the highest rSASA positions sequentially.
+    """
+    rsasa_np = compute_rsasa(sequence, sasa)
+    plddt_np = np.array(plddt)
+    
+    # Base masking rules
+    mask = (plddt_np >= 70.0) & (rsasa_np >= 0.15)
+    valid_indices = np.where(mask)[0]
+    
+    if len(valid_indices) < MIN_FINGERPRINT_LEN:
+        return None
+        
+    if len(valid_indices) > max_len:
+        # Get rsasa values for the currently valid indices only
+        valid_rsasa = rsasa_np[valid_indices]
+        
+        # Find the indices of the top `max_len` values within the valid subset
+        top_subset_indices = np.argsort(valid_rsasa)[-max_len:]
+        
+        # Map those subset indices back to the original chronological sequence indices
+        final_indices = valid_indices[top_subset_indices]
+        
+        # Create a strict mask keeping only those final selected indices
+        strict_mask = np.zeros_like(mask, dtype=bool)
+        strict_mask[final_indices] = True
+        return strict_mask
+        
+    return mask
+
+
 class BinderFeatures:
     """Container for binder features with serialization support."""
 
@@ -379,4 +454,8 @@ __all__ = [
     "BinderFeatures",
     "TargetFeatures",
     "FingerprintFeatures",
+    "compute_rsasa",
+    "get_fingerprint_mask",
+    "MIN_FINGERPRINT_LEN",
+    "MAX_SASA_REFERENCE",
 ]
