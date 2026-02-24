@@ -20,7 +20,12 @@ from pathlib import Path
 import lmdb
 import msgpack
 
-from mimir.structure_features import TargetFeatures, compute_rsasa, get_fingerprint_mask
+from mimir.structure_features import (
+    TargetFeatures, 
+    compute_rsasa, 
+    get_smoothed_rsasa, 
+    get_fingerprint_mask
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,30 +51,33 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .chart-wrapper { width: 100%; height: 35vh; overflow-x: auto; overflow-y: hidden; background: #0f172a; border-bottom: 2px solid #334155; flex: 0 0 auto; display: flex; align-items: center; position: relative; }
         .chart-container { display: flex; position: relative; width: max-content; padding: 0 20px; height: 100%; align-items: center; }
         
-        .col { display: flex; flex-direction: column; width: 22px; align-items: center; position: relative; z-index: 2; margin: 0 1px; cursor: pointer; }
+        .col { display: flex; flex-direction: column; width: 28px; align-items: center; position: relative; z-index: 2; margin: 0 1px; cursor: pointer; }
         .hover-target { position: absolute; inset: 0; z-index: 10; cursor: pointer; border-radius: 4px; transition: background 0.1s; }
         .hover-target:hover, .col.active .hover-target { background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.3); box-sizing: border-box; }
         
-        .rsasa-cell { height: 10vh; width: 100%; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 8px; }
-        .rsasa-bar { width: 14px; border-radius: 3px 3px 0 0; }
+        .rsasa-cell { height: 10vh; width: 100%; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 8px; gap: 2px; }
+        .rsasa-bar { width: 10px; border-radius: 3px 3px 0 0; }
+        .smoothed-rsasa-bar { width: 10px; border-radius: 3px 3px 0 0; }
         
-        .seq-cell { height: 26px; width: 22px; display: flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: bold; border-radius: 4px; }
+        .seq-cell { height: 26px; width: 24px; display: flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: bold; border-radius: 4px; }
         
         .plddt-cell { height: 10vh; width: 100%; display: flex; align-items: flex-start; justify-content: center; padding-top: 8px; }
         .plddt-bar { width: 14px; border-radius: 0 0 3px 3px; }
         
         /* Threshold Lines - we anchor relative to the full wrapper */
         .lines-container { position: absolute; top: 0; bottom: 0; left: 0; right: 0; z-index: 1; pointer-events: none; }
-        .thresh-rsasa { position: absolute; height: 1px; width: 100%; border-top: 1px dashed #94a3b8; opacity: 0.5; left: 0; bottom: calc(50% + 14px + 1.5vh); } /* +14px for half sequence seq-cell box + 1.5vh representing 0.15 * 10vh max rsasa */
+        .thresh-rsasa { position: absolute; height: 1px; width: 100%; border-top: 1px dashed #94a3b8; opacity: 0.5; left: 0; } 
         .thresh-plddt { position: absolute; height: 1px; width: 100%; border-top: 1px solid #ef4444; opacity: 0.5; left: 0; top: calc(50% + 14px + 7vh); } /* top down, +14px for half sequence box + 7vh representing (100-70)=30 down but plddt goes 0..100 mapping to 10vh height, so 70 is 7vh down from the center start point */
         
         /* Masked IN */
         .col.in .rsasa-bar { background: #0ea5e9; }
+        .col.in .smoothed-rsasa-bar { background: #8b5cf6; } /* Purple for smoothed */
         .col.in .seq-cell { background: #3b82f6; color: #ffffff; box-shadow: 0 0 8px rgba(59, 130, 246, 0.5); }
         .col.in .plddt-bar { background: #f59e0b; }
         
         /* Masked OUT */
         .col.out .rsasa-bar { background: #475569; opacity: 0.3; }
+        .col.out .smoothed-rsasa-bar { background: #475569; opacity: 0.3; }
         .col.out .seq-cell { background: #334155; color: #64748b; }
         .col.out .plddt-bar { background: #475569; opacity: 0.3; }
         
@@ -98,9 +106,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <h1>Target Fingerprint: {{ TARGET_ID }}</h1>
             <p class="subtitle">1D sequence track mapping to 3D structure.</p>
         </div>
+        <div style="display: flex; gap: 24px; align-items: center; background: rgba(0,0,0,0.2); padding: 8px 12px; border-radius: 8px; border: 1px solid #334155;">
+            <div>
+                <p class="subtitle" style="font-size: 11px; margin-bottom: 4px;"><strong>LEGEND</strong></p>
+                <div style="display: flex; gap: 12px; font-size: 11px; color: #cbd5e1;">
+                    <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; background: #0ea5e9; display: inline-block;"></span> rSASA</span>
+                    <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; background: #8b5cf6; display: inline-block;"></span> Smoothed rSASA</span>
+                </div>
+            </div>
+            <div style="height: 24px; width: 1px; background: #475569;"></div>
+            <div>
+                <p class="subtitle" style="font-size: 11px; margin-bottom: 4px;"><strong>THRESHOLDS</strong></p>
+                <div style="display: flex; gap: 12px; font-size: 11px; color: #cbd5e1;">
+                    <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 12px; height: 1px; border-top: 1px solid #ef4444; display: inline-block;"></span> pLDDT = 70.0</span>
+                    <span style="display: flex; align-items: center; gap: 4px;"><span style="width: 12px; height: 1px; border-top: 1px dashed #94a3b8; display: inline-block;"></span> Smoothed rSASA = <span id="legend-rsasa-thresh">N/A</span></span>
+                </div>
+            </div>
+        </div>
         <div style="text-align: right;">
-            <p class="subtitle" style="color: #cbd5e1;">Hover/Click 1D boxes to highlight 3D residues.</p>
-            <p class="subtitle" style="font-size: 11px;">Green atoms = Kept Fingerprint</p>
+            <p class="subtitle" style="color: #cbd5e1; font-size: 13px;">Hover/Click boxes to highlight 3D</p>
+            <p class="subtitle" style="font-size: 11px; color: #4ade80;">Green atoms = Kept Fingerprint</p>
         </div>
     </header>
 
@@ -120,6 +145,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <h2><span>Pos <span id="tt-pos"></span></span> <span id="tt-aa"></span></h2>
             <div class="row"><span class="label">Status</span> <span id="tt-status" class="badge"></span></div>
             <div class="row"><span class="label">rSASA</span> <span id="tt-rsasa" class="value"></span></div>
+            <div class="row"><span class="label">Sm. rSASA</span> <span id="tt-smoothed-rsasa" class="value" style="color: #c4b5fd;"></span></div>
             <div class="row"><span class="label">pLDDT</span> <span id="tt-plddt" class="value"></span></div>
         </div>
     </div>
@@ -140,14 +166,30 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const rsasaMaxHt = (window.innerHeight * 0.10); // 10vh
             const plddtMaxHt = (window.innerHeight * 0.10); // 10vh
 
+            // Setup dynamic rsasa threshold line position
+            if (DATA.rsasa_threshold !== null) {
+                const rsasaLine = document.querySelector('.thresh-rsasa');
+                // Calculate position relative to bottom just like the old static calculation 
+                // but using the dynamic threshold
+                const vhVal = DATA.rsasa_threshold * 10;
+                rsasaLine.style.bottom = `calc(50% + 14px + ${vhVal}vh)`;
+                document.getElementById('legend-rsasa-thresh').textContent = DATA.rsasa_threshold.toFixed(2);
+            } else {
+                // hide it if None
+                document.querySelector('.thresh-rsasa').style.display = 'none';
+                document.getElementById('legend-rsasa-thresh').textContent = "None (fits)";
+            }
+
             for (let i = 0; i < DATA.sequence.length; i++) {
                 const aa = DATA.sequence[i];
                 const rsasa = DATA.rsasa[i];
+                const smoothed_rsasa = DATA.smoothed_rsasa[i];
                 const plddt = DATA.plddt[i];
                 const isMaskedIn = DATA.mask[i];
                 const pos = DATA.positions[i]; // 1-indexed AlphaFold / mmCIF sequence position
                 
                 const rsasaHeight = Math.min(rsasa, 1.0) * rsasaMaxHt;
+                const smoothedRsasaHeight = Math.min(smoothed_rsasa, 1.0) * rsasaMaxHt;
                 const plddtHeight = (plddt / 100) * plddtMaxHt;
                 
                 const col = document.createElement('div');
@@ -156,7 +198,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 
                 col.innerHTML = `
                     <div class="hover-target"></div>
-                    <div class="rsasa-cell"><div class="rsasa-bar" style="height: ${rsasaHeight}px;"></div></div>
+                    <div class="rsasa-cell">
+                        <div class="rsasa-bar" style="height: ${rsasaHeight}px;"></div>
+                        <div class="smoothed-rsasa-bar" style="height: ${smoothedRsasaHeight}px;"></div>
+                    </div>
                     <div class="seq-cell">${aa}</div>
                     <div class="plddt-cell"><div class="plddt-bar" style="height: ${plddtHeight}px;"></div></div>
                 `;
@@ -224,6 +269,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         function highlightPos(idx) {
             const aa = DATA.sequence[idx];
             const rsasa = DATA.rsasa[idx];
+            const smoothed_rsasa = DATA.smoothed_rsasa[idx];
             const plddt = DATA.plddt[idx];
             const isMaskedIn = DATA.mask[idx];
             const pos = DATA.positions[idx];
@@ -232,6 +278,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             document.getElementById('tt-pos').textContent = pos;
             document.getElementById('tt-aa').textContent = aa;
             document.getElementById('tt-rsasa').textContent = rsasa.toFixed(3);
+            document.getElementById('tt-smoothed-rsasa').textContent = smoothed_rsasa.toFixed(3);
             document.getElementById('tt-plddt').textContent = plddt.toFixed(1);
             
             const statusEl = document.getElementById('tt-status');
@@ -315,8 +362,8 @@ def main() -> None:
     parser.add_argument(
         "--max-len",
         type=int,
-        default=157,
-        help="Maximum number of positions to keep in the fingerprint (default: 157)",
+        default=280,
+        help="Maximum number of positions to keep in the fingerprint (default: 280)",
     )
     args = parser.parse_args()
 
@@ -352,14 +399,17 @@ def main() -> None:
 
     # 1. Calculate values
     rsasa_np = compute_rsasa(target.sequence, target.sasa)
+    smoothed_rsasa_np = get_smoothed_rsasa(rsasa_np, window_size=15)
     
-    # 2. Get Boolean Mask
-    mask_np = get_fingerprint_mask(
+    # 2. Get Boolean Mask and Threshold
+    mask_result = get_fingerprint_mask(
         sequence=target.sequence,
         sasa=target.sasa,
         plddt=target.residue_plddt,
         max_len=args.max_len
     )
+    
+    mask_np, threshold = mask_result
     
     if mask_np is None:
         logger.warning(
@@ -394,8 +444,10 @@ def main() -> None:
         "sequence": target.sequence,
         "positions": target.position_ids,
         "rsasa": rsasa_np.tolist(),
+        "smoothed_rsasa": smoothed_rsasa_np.tolist(),
         "plddt": target.residue_plddt,
         "mask": mask_list,
+        "rsasa_threshold": threshold,
     }
 
     logger.info("Injecting data into HTML template...")

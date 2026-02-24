@@ -8,7 +8,7 @@ Usage:
     uv run python -m scripts.dataset.create_features_fingerprints \
         -i data/run78-v2/features_targets \
         -o data/run78-v2/features_fingerprints \
-        [--max-len 157] [--verbose]
+        [--max-len 280] [--verbose]
 """
 
 import argparse
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 def extract_fingerprint(
     target: TargetFeatures,
-    max_len: int = 157,
+    max_len: int = 280,
 ) -> FingerprintFeatures | None:
     """Extract a synchronized sub-sequence fingerprint matching masking rules.
 
@@ -58,13 +58,15 @@ def extract_fingerprint(
     plddt_np = np.array(target.residue_plddt)
     pos_np = np.array(target.position_ids)
 
-    # 1. Get the shared centralized boolean mask
-    mask = get_fingerprint_mask(
+    # 1. Get the shared centralized boolean mask and threshold
+    mask_result = get_fingerprint_mask(
         sequence=target.sequence,
         sasa=target.sasa,
         plddt=target.residue_plddt,
         max_len=max_len,
     )
+
+    mask, threshold = mask_result
 
     if mask is None:
         return None
@@ -83,6 +85,7 @@ def extract_fingerprint(
         sasa=f_sasa.tolist(),
         residue_plddt=f_plddt.tolist(),
         position_ids=f_pos.tolist(),
+        rsasa_threshold=threshold,
     )
 
     return fingerprint
@@ -112,8 +115,8 @@ def main() -> None:
     parser.add_argument(
         "--max-len",
         type=int,
-        default=157,
-        help="Maximum length of the fingerprint (default: 157)",
+        default=280,
+        help="Maximum length of the fingerprint (default: 280)",
     )
     parser.add_argument(
         "--limit",
@@ -149,7 +152,7 @@ def main() -> None:
 def create_features_fingerprints(
     input_lmdb: Path,
     output_lmdb: Path,
-    max_len: int = 157,
+    max_len: int = 280,
     limit: int | None = None,
 ) -> None:
     """Process targets into fingerprints.

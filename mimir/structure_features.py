@@ -282,43 +282,69 @@ def compute_rsasa(sequence: str, sasa: list[float] | np.ndarray) -> np.ndarray:
     return rsasa
 
 
+def get_smoothed_rsasa(rsasa_np: np.ndarray, window_size: int = 15) -> np.ndarray:
+    """Compute smoothed rSASA using a sliding window.
+    
+    Properly handles boundary edges by averaging only over available amino acids.
+    """
+    half_window = window_size // 2
+    n = len(rsasa_np)
+    
+    smoothed_rsasa = np.zeros(n, dtype=np.float32)
+    for i in range(n):
+        # Window bounds in original array space
+        start_idx = max(0, i - half_window)
+        end_idx = min(n - 1, i + half_window)
+        smoothed_rsasa[i] = np.mean(rsasa_np[start_idx:end_idx + 1])
+        
+    return smoothed_rsasa
+
+
 def get_fingerprint_mask(
     sequence: str,
     sasa: list[float] | np.ndarray,
     plddt: list[float] | np.ndarray,
     max_len: int = 157,
-) -> np.ndarray | None:
-    """Returns a boolean mask of the kept positions, or None if skipped by min-length.
+) -> tuple[np.ndarray | None, float | None]:
+    """Returns a boolean mask of the kept positions and the applied rSASA threshold.
     
-    Filters positions based on pLDDT >= 70.0 and rSASA >= 0.15.
-    If valid positions > max_len, keeps only the highest rSASA positions sequentially.
+    Returns (mask, threshold) or (None, None) if skipped by min-length.
+    Filters by pLDDT >= 70.0. If valid positions > max_len, incrementally 
+    filters by smoothed rSASA (window size 15) using a 0.01 threshold 
+    increment until it fits within max_len.
     """
     rsasa_np = compute_rsasa(sequence, sasa)
     plddt_np = np.array(plddt)
     
-    # Base masking rules
-    mask = (plddt_np >= 70.0) & (rsasa_np >= 0.15)
-    valid_indices = np.where(mask)[0]
+    # Compute smoothed rSASA (sliding window of 15: 7 before, 7 after)
+    smoothed_rsasa = get_smoothed_rsasa(rsasa_np, window_size=15)
+        
+    # Base masking rules: strictly pLDDT >= 70.0
+    base_mask = plddt_np >= 70.0
+    valid_indices = np.where(base_mask)[0]
     
+    # The min length filter applies after plddt filtering
     if len(valid_indices) < MIN_FINGERPRINT_LEN:
-        return None
+        return None, None
         
-    if len(valid_indices) > max_len:
-        # Get rsasa values for the currently valid indices only
-        valid_rsasa = rsasa_np[valid_indices]
+    if len(valid_indices) <= max_len:
+        return base_mask, None
         
-        # Find the indices of the top `max_len` values within the valid subset
-        top_subset_indices = np.argsort(valid_rsasa)[-max_len:]
+    # Iterative step-wise thresholding on smoothed rSASA
+    threshold = 0.01
+    
+    while True:
+        current_mask = base_mask & (smoothed_rsasa >= threshold)
         
-        # Map those subset indices back to the original chronological sequence indices
-        final_indices = valid_indices[top_subset_indices]
-        
-        # Create a strict mask keeping only those final selected indices
-        strict_mask = np.zeros_like(mask, dtype=bool)
-        strict_mask[final_indices] = True
-        return strict_mask
-        
-    return mask
+        if current_mask.sum() <= max_len:
+            # We reached the target length budget
+            return current_mask, round(threshold, 2)
+            
+        # If we accidentally cull too much, fail gracefully
+        if current_mask.sum() < MIN_FINGERPRINT_LEN:
+            return None, None
+            
+        threshold += 0.01
 
 
 class BinderFeatures:
@@ -413,6 +439,7 @@ class FingerprintFeatures:
         sasa: list[float],
         residue_plddt: list[float],
         position_ids: list[int],
+        rsasa_threshold: float | None = None,
     ):
         self.entry_id = entry_id
         self.sequence = sequence
@@ -420,6 +447,7 @@ class FingerprintFeatures:
         self.sasa = sasa
         self.residue_plddt = residue_plddt
         self.position_ids = position_ids
+        self.rsasa_threshold = rsasa_threshold
 
     def to_dict(self) -> dict:
         return {
@@ -429,6 +457,7 @@ class FingerprintFeatures:
             "sasa": self.sasa,
             "residue_plddt": self.residue_plddt,
             "position_ids": self.position_ids,
+            "rsasa_threshold": self.rsasa_threshold,
         }
 
     @classmethod
@@ -440,6 +469,7 @@ class FingerprintFeatures:
             sasa=data.get("sasa", []),
             residue_plddt=data.get("residue_plddt", []),
             position_ids=data.get("position_ids", []),
+            rsasa_threshold=data.get("rsasa_threshold"),
         )
 
 
@@ -455,6 +485,7 @@ __all__ = [
     "TargetFeatures",
     "FingerprintFeatures",
     "compute_rsasa",
+    "get_smoothed_rsasa",
     "get_fingerprint_mask",
     "MIN_FINGERPRINT_LEN",
     "MAX_SASA_REFERENCE",
