@@ -1,221 +1,267 @@
 """
-PyTorch Dataset for peptide sequences.
-
-This module handles variable-length peptides (e.g. 4-512+ amino acids) using dynamic padding.
-It delegates padding to the `dynamic_collate_fn` to ensure efficient GPU utilization 
-by padding only to the longest sequence in the batch.
+PyTorch Dataset and Dataloader utilities for Mimir v2.
+Handles LMDB reading, bucket-based batching, and dynamic padding.
 """
 
 import csv
+import logging
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Dict, Iterator, List, Tuple, Optional
+import math
+import random
 
+import lmdb
+import msgpack
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
-from .tokenizer import AminoAcidTokenizer
+from mimir.tokenizer import MimirTokenizer, build_input_tensors
+
+logger = logging.getLogger(__name__)
 
 
-def create_dynamic_collate_fn(pad_idx: int, mask_idx: int) -> Callable:
+def pad_to_multiple(length: int, multiple: int = 64) -> int:
+    """Returns the nearest multiple of `multiple` above or equal to `length`."""
+    if length == 0:
+        return multiple
+    return math.ceil(length / multiple) * multiple
+
+
+class MimirDataset(Dataset):
     """
-    Create a collate function that handles dynamic padding AND masked language modeling (MLM).
-    
-    This function prepares batches for BERT-style training:
-    1.  **Dynamic Padding**: Pads all sequences to the length of the longest sequence in the batch.
-    2.  **Masking**: randomly masks ~15% of the *sequence* tokens (not targets/specials).
-    3.  **Label Creation**: Creates labels for loss calculation, ignoring unmasked tokens.
-    
-    Args:
-        pad_idx (int): The token index for PAD.
-        mask_idx (int): The token index for MASK (used to replace input tokens).
-    
-    Returns:
-        A collate_fn compatible with torch.utils.data.DataLoader
-    """
-    def dynamic_collate_fn(batch: list[dict]) -> dict:
-        """
-        Collates samples into a batch with MLM masking.
-        
-        Input Schema (per item):
-            - tokens: Tensor[Long] of shape (L_seq) - [Target, BOS, seq..., EOS, Pad...]
-            - length: int - Valid user specified length
-            - target_id: int - The prepended target token
-            
-        Output Schema (Batched):
-            - tokens: [Batch, L_max] - Masked inputs
-            - labels: [Batch, L_max] - Ground truth for masked positions (-100 elsewhere)
-            - pad_mask: [Batch, L_max] - True where padded
-        """
-        # 1. Stack and Pad
-        # ----------------
-        # Extract tokens and lengths
-        tokens_list = [item["tokens"] for item in batch]
-        lengths = torch.stack([item["length"] for item in batch])
-        max_len = lengths.max().item()
-        
-        # Pad sequences to the max length in this batch
-        from torch.nn.utils.rnn import pad_sequence
-        batch_tokens = pad_sequence(tokens_list, batch_first=True, padding_value=pad_idx)
-        
-        # Warning: pad_sequence pads to the longest in batch, which matches max_len
-        # (Assuming no truncation happened before that violated max_length constraint relative to batch)
-        
-        # 2. Create Masks
-        # ---------------
-        # We need two masks:
-        # a) padding_mask: to ignore padding in attention (and loss)
-        # b) mlm_mask: to select which tokens to mask for prediction
-        
-        # Create position grid [1, L_max]
-        positions = torch.arange(max_len, device=batch_tokens.device).unsqueeze(0)
-        
-        # Padding Mask: True where position >= actual length
-        # Used by attention mechanism to ignore pads
-        pad_mask = positions >= lengths.unsqueeze(1) 
-        
-        # 3. Apply BERT-style Masking
-        # ---------------------------
-        # We assume structure: [Target (0), BOS (1), Seq_Start (2) ... Seq_End (Len-2), EOS (Len-1)]
-        # We ONLY want to mask the actual Sequence tokens.
-        
-        # Create a copy for labels (ground truth)
-        labels = batch_tokens.clone()
-        
-        # Initialize inputs as a copy of ground truth (we will overwrite some with <mask>)
-        inputs = batch_tokens.clone()
-        
-        # Iterate over each sequence in the batch to apply random masking
-        # Vectorizing this fully is complex due to variable lengths, so we loop over batch (B is small ~32-64)
-        batch_size = batch_tokens.size(0)
-        
-        for i in range(batch_size):
-            # Get valid length for this sequence
-            l = lengths[i].item()
-            
-            # Define valid range for masking:
-            # Start: 2 (Skip Target @ 0 and BOS @ 1)
-            # End: l - 1 (Skip EOS @ l-1)
-            # Example: [T, BOS, A, B, C, EOS] (len=6) -> valid indices [2, 3, 4] (A, B, C)
-            valid_start = 2
-            valid_end = l - 1
-            
-            if valid_end <= valid_start:
-                # Sequence too short to have maskable tokens (e.g., just special tokens)
-                # Should not happen with valid peptides >= 4aa
-                labels[i] = -100 # Ignore whole sequence
-                continue
-                
-            # Calculate number of tokens to mask
-            # Constraint: Variable masking between 25% and 75%
-            # We sample a ratio uniformly from [0.25, 0.75]
-            ratio = torch.empty(1).uniform_(0.25, 0.75).item()
-            
-            seq_len = valid_end - valid_start
-            num_mask = max(1, int(seq_len * ratio))
-            
-            # Select random indices within the valid range
-            # torch.randperm returns random permutation of 0..seq_len-1
-            # We take first 'num_mask' and shift by 'valid_start'
-            mask_indices = torch.randperm(seq_len)[:num_mask] + valid_start
-            
-            # Apply Masking to INPUTS
-            inputs[i, mask_indices] = mask_idx
-            
-            # Set LABELS
-            # We want to calculate loss ONLY on mask_indices.
-            # So we set everything else to -100 (PyTorch CrossEntropy ignore_index)
-            # First, set the whole label row to -100
-            labels[i] = -100 
-            # Then restore the ground truth ONLY at mask_indices
-            labels[i, mask_indices] = batch_tokens[i, mask_indices]
-            
-        return {
-            "tokens": inputs,      # Masked input tokens
-            "labels": labels,      # -100 everywhere except masked positions
-            "length": lengths,     # Original lengths
-            "target_id": torch.stack([item["target_id"] for item in batch]),
-            "pad_mask": pad_mask,  # Attention mask
-        }
-    
-    return dynamic_collate_fn
-
-
-class PeptideDataset(Dataset):
-    """
-    Dataset for peptide sequences with optional targets.
-
-    Each sample contains:
-        - sequence: Tokenized peptide sequence (No padding at dataset level; handled by collate_fn)
-        - length: Original sequence length
-        - target_id: Integer ID of target protein (-1 if no target)
+    Dataset for Mimir v2 fine-tuning.
+    Reads associations from CSV and streams features from LMDBs.
     """
 
     def __init__(
         self,
-        dataset_path: str | Path,
-        tokenizer: AminoAcidTokenizer,
+        associations_csv: Path | str,
+        fingerprints_lmdb: Path | str,
+        binders_lmdb: Path | str,
+        tokenizer: MimirTokenizer,
     ):
-        """
-        Load dataset from CSV file.
-
-        Args:
-            dataset_path: Path to dataset.csv
-            tokenizer: AminoAcidTokenizer instance
-        """
+        self.associations_csv = Path(associations_csv)
+        self.fingerprints_lmdb = Path(fingerprints_lmdb)
+        self.binders_lmdb = Path(binders_lmdb)
         self.tokenizer = tokenizer
-        self.samples = []
         
-        # We no longer build target_to_id here. 
-        # The tokenizer must already be initialized with all targets.
-
-        with open(dataset_path) as f:
+        # We will lazy-initialize lmdb environments in worker processes
+        self._fp_env = None
+        self._bin_env = None
+        
+        self.samples: List[Dict[str, str]] = []
+        self._load_associations()
+        
+    def _load_associations(self):
+        """Loads all associations into memory."""
+        with open(self.associations_csv, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                self.samples.append(
-                    {
-                        "sequence": row["sequence"],
-                        "target": row["target"],
-                    }
-                )
-        
-        # Pre-calculate lengths for LengthGroupedSampler
-        self.lengths = []
-        for s in self.samples:
-            # +3 for Target, BOS, EOS
-            l = len(s["sequence"]) + 3
-            self.lengths.append(l)
-            
-        print(f"Dataset loaded with {len(self.samples)} samples. Max length detected: {max(self.lengths) if self.lengths else 0}")
+                # Support varying column names
+                target = row.get("target_id", row.get("target", row.get("uniprot_accession")))
+                binder = row.get("binder_id")
+                if target and binder:
+                    self.samples.append({
+                        "target": target,
+                        "binder": binder
+                    })
+        logger.info(f"Loaded {len(self.samples)} associations from {self.associations_csv}")
 
-    def get_lengths(self) -> list[int]:
-        """Return list of lengths for all samples."""
-        return self.lengths
+    def _init_lmdbs(self):
+        if self._fp_env is None:
+            self._fp_env = lmdb.open(str(self.fingerprints_lmdb), readonly=True, lock=False)
+        if self._bin_env is None:
+            self._bin_env = lmdb.open(str(self.binders_lmdb), readonly=True, lock=False)
 
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> dict:
+    def __getitem__(self, idx: int) -> Optional[Dict[str, torch.Tensor]]:
+        """
+        Returns tensor dict for the sample or None if missing from LMDBs.
+        Dataloader collate_fn must cleanly filter out Nones.
+        """
+        self._init_lmdbs()
+        
         sample = self.samples[idx]
-        sequence = sample["sequence"]
-        target = sample["target"]
+        target_id = sample["target"]
+        binder_id = sample["binder"]
         
-        # Get target ID from tokenizer
-        try:
-            target_id = self.tokenizer.get_target_id(target)
-        except ValueError:
-            target_id = -1 
-
-        # Encode sequence (BOS...EOS)
-        seq_tokens = self.tokenizer.encode(sequence, max_length=None)
-        
-        # Prepend target token
-        # [TARGET] [BOS] ... [EOS]
-        tokens = [target_id] + seq_tokens
-        
-        # No truncation logic - Return exactly what the dataset provides.
+        with self._fp_env.begin() as txn:
+            fp_data = txn.get(target_id.encode("utf-8"))
+        if not fp_data:
+            return None
             
+        with self._bin_env.begin() as txn:
+            bin_data = txn.get(binder_id.encode("utf-8"))
+        if not bin_data:
+            return None
+            
+        fp_obj = msgpack.unpackb(fp_data, raw=False)
+        bin_obj = msgpack.unpackb(bin_data, raw=False)
+        
+        seq, struct, sasa, pos_ids, attn_mask = build_input_tensors(
+            fingerprint=fp_obj,
+            binder=bin_obj,
+            tokenizer=self.tokenizer
+        )
+        
         return {
-            "tokens": torch.tensor(tokens, dtype=torch.long),
-            "length": torch.tensor(len(tokens), dtype=torch.long),
-            "target_id": torch.tensor(target_id, dtype=torch.long),
+            "sequence": seq,
+            "structure": struct,
+            "sasa": sasa,
+            "position_ids": pos_ids,
+            "attention_mask": attn_mask,
+            "length": len(seq)
         }
+
+
+def mimir_collate_fn(batch: List[Optional[Dict[str, torch.Tensor]]], tokenizer: MimirTokenizer) -> Dict[str, torch.Tensor]:
+    """
+    Filters None (skipped samples) and pads the batch to a multiple of 64.
+    """
+    valid_batch = [b for b in batch if b is not None]
+    
+    if not valid_batch:
+        # Edge case: entire batch is skipped
+        return {}
+        
+    max_len = max(b["length"] for b in valid_batch)
+    padded_len = pad_to_multiple(max_len, 64)
+    
+    batch_size = len(valid_batch)
+    
+    # Initialize padded tensors
+    seq_padded = torch.full((batch_size, padded_len), tokenizer.seq_pad, dtype=torch.long)
+    struct_padded = torch.full((batch_size, padded_len), tokenizer.struct_pad, dtype=torch.long)
+    sasa_padded = torch.full((batch_size, padded_len), tokenizer.sasa_pad, dtype=torch.long)
+    # Position IDs can be padded with 0 since they are ignored by attention mask
+    pos_padded = torch.zeros((batch_size, padded_len), dtype=torch.long)
+    # Attention mask padded with 0
+    attn_padded = torch.zeros((batch_size, padded_len), dtype=torch.long)
+    
+    for i, item in enumerate(valid_batch):
+        l = item["length"]
+        seq_padded[i, :l] = item["sequence"]
+        struct_padded[i, :l] = item["structure"]
+        sasa_padded[i, :l] = item["sasa"]
+        pos_padded[i, :l] = item["position_ids"]
+        attn_padded[i, :l] = item["attention_mask"]
+        
+    return {
+        "sequence": seq_padded,
+        "structure": struct_padded,
+        "sasa": sasa_padded,
+        "position_ids": pos_padded,
+        "attention_mask": attn_padded,
+    }
+
+
+class BucketBatchSampler(Sampler):
+    """
+    Groups samples of similar lengths into batches to minimize padding.
+    """
+    def __init__(
+        self,
+        dataset: MimirDataset,
+        batch_size: int,
+        epoch: int = 0
+    ):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.epoch = epoch
+        
+        # We need lengths for bucketing. Since lengths depend on FP length (in LMDB),
+        # getting exact length for every sample upfront is slow (minutes for large DBs).
+        # We scan it once efficiently or rely on a pre-computed lengths dictionary.
+        # However, for correct bucket batching, we must scan at init.
+        self.lengths = self._scan_lengths()
+        
+    def _scan_lengths(self) -> List[int]:
+        logger.info("Scanning dataset lengths for bucket batching...")
+        lengths = []
+        fp_env = lmdb.open(str(self.dataset.fingerprints_lmdb), readonly=True, lock=False)
+        bin_env = lmdb.open(str(self.dataset.binders_lmdb), readonly=True, lock=False)
+        
+        skipped = 0
+        with fp_env.begin() as fp_txn, bin_env.begin() as bin_txn:
+            for sample in self.dataset.samples:
+                fp_data = fp_txn.get(sample['target'].encode('utf-8'))
+                bin_data = bin_txn.get(sample['binder'].encode('utf-8'))
+                
+                if not fp_data or not bin_data:
+                    lengths.append(-1) # Placeholder for missing
+                    skipped += 1
+                    continue
+                    
+                fp_obj = msgpack.unpackb(fp_data, raw=False)
+                bin_obj = msgpack.unpackb(bin_data, raw=False)
+                
+                # Total length = 1 (BOS) + FP length + 1 (CUT) + Binder length + 1 (EOS)
+                fp_len = len(fp_obj["position_ids"])
+                bin_len = len(bin_obj["sequence"])
+                total_len = 1 + fp_len + 1 + bin_len + 1
+                lengths.append(total_len)
+                
+        if skipped > 0:
+            logger.info(f"Skipped {skipped} samples during length scan (missing from LMDB).")
+            
+        fp_env.close()
+        bin_env.close()
+        return lengths
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def __iter__(self) -> Iterator[List[int]]:
+        # Define buckets based on multiples of 64
+        buckets: Dict[int, List[int]] = {}
+        for idx, length in enumerate(self.lengths):
+            if length == -1:
+                # We can still batch missing samples; they'll be filtered by collate_fn
+                # We assign them to the smallest bucket to minimize impact
+                bucket_id = 64
+            else:
+                bucket_id = pad_to_multiple(length, 64)
+                
+            if bucket_id not in buckets:
+                buckets[bucket_id] = []
+            buckets[bucket_id].append(idx)
+            
+        # Shuffle within each bucket with the epoch seed
+        rng = random.Random(self.epoch)
+        for b_id in buckets:
+            rng.shuffle(buckets[b_id])
+            
+        # Form batches
+        batches = []
+        for b_id, indices in buckets.items():
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i:i + self.batch_size]
+                if len(batch) == self.batch_size:
+                    batches.append(batch)
+                elif len(batch) > 0:
+                    # Drop last or keep? Usually we keep partial batches unless drop_last=True
+                    batches.append(batch)
+                    
+        # Shuffle the order of batches
+        rng.shuffle(batches)
+        
+        return iter(batches)
+
+    def __len__(self) -> int:
+        # Approximate if there are partial batches
+        total_batches = 0
+        for b_id, indices in self._get_buckets().items():
+            total_batches += math.ceil(len(indices) / self.batch_size)
+        return total_batches
+
+    def _get_buckets(self):
+        # Helper to calculate length without modifying state
+        buckets: Dict[int, List[int]] = {}
+        for idx, length in enumerate(self.lengths):
+            bucket_id = 64 if length == -1 else pad_to_multiple(length, 64)
+            if bucket_id not in buckets:
+                buckets[bucket_id] = []
+            buckets[bucket_id].append(idx)
+        return buckets

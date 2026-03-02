@@ -1,86 +1,163 @@
-"""Tokenizer for amino acid sequences using ESM-3's vocabulary.
-
-This module provides a wrapper around ESM-3's tokenizer that handles
-target conditioning tokens for fine-tuning.
+"""
+Tokenizer and dataloader utilities for Mimir v2.
 """
 
-from typing import List, Optional
+from typing import Dict, Any, Tuple, Optional, List
+import torch
+import numpy as np
+from esm.models.esm3 import ESM3
+from esm.utils import encoding
 
-from esm.tokenization import EsmSequenceTokenizer
+# --- Constants for ESM3 Tracks ---
+# Sequence vocab is 64 tokens explicitly defined.
+CUT_TOKEN_ID_SEQ = 64
+# Structure max token is padding (4099). We use 4100.
+CUT_TOKEN_ID_STRUCT = 4100
+# SASA uses bins 0-15 and 0 as mask/pad. We use 32 safely.
+CUT_TOKEN_ID_SASA = 32
+
+class MimirTokenizer:
+    def __init__(self, tokenizer_collection):
+        self.sequence = tokenizer_collection.sequence
+        self.structure = tokenizer_collection.structure
+        self.sasa = tokenizer_collection.sasa
+        
+        # New cut tokens
+        self.cut_seq = CUT_TOKEN_ID_SEQ
+        self.cut_struct = CUT_TOKEN_ID_STRUCT
+        self.cut_sasa = CUT_TOKEN_ID_SASA
+        
+        # Base special tokens
+        self.seq_bos = self.sequence.bos_token_id
+        self.seq_eos = self.sequence.eos_token_id
+        self.seq_pad = self.sequence.pad_token_id
+        self.seq_mask = self.sequence.mask_token_id
+        
+        self.struct_pad = getattr(self.structure, "pad_token_id", 4099)
+        self.struct_mask = getattr(self.structure, "mask_token_id", 4096)
+        
+        self.sasa_pad = getattr(self.sasa, "pad_token_id", 0)
+        self.sasa_mask = getattr(self.sasa, "mask_token_id", 0)
 
 
-class AminoAcidTokenizer:
+def load_tokenizer() -> MimirTokenizer:
     """
-    Tokenizer for Amino Acid sequences using ESM-3's vocabulary.
-    
-    This wrapper ensures consistent encoding/decoding and handles
-    sequence truncation/padding logic required for fixed-size or dynamic batching.
-    
-    Attributes:
-        tokenizer (EsmSequenceTokenizer): The underlying ESM-3 tokenizer.
-        pad_idx (int): Index for the padding token.
-        bos_idx (int): Index for the Beginning Of Sequence token.
-        eos_idx (int): Index for the End Of Sequence token.
+    Loads the ESM3 base tokenizer and registers the <cut> token on all three tracks.
+    Returns the extended tokenizer. Called once at startup.
+    Token IDs must be identical across both contexts.
     """
+    model = ESM3.from_pretrained("esm3_sm_open_v1")
+    return MimirTokenizer(model.tokenizers)
 
-    def __init__(self, targets: Optional[List[str]] = None):
-        self.tokenizer = EsmSequenceTokenizer()
-        self.pad_idx = self.tokenizer.pad_token_id
-        self.bos_idx = self.tokenizer.bos_token_id
-        self.eos_idx = self.tokenizer.eos_token_id
-        
-        # Standard vocab size
-        self.base_vocab_size = self.tokenizer.vocab_size
-        
-        # Target tokens
-        self.target_to_id = {}
-        self.id_to_target = {}
-        
-        if targets:
-            # Sort for deterministic ID assignment
-            for i, target in enumerate(sorted(set(targets))):
-                # Assign IDs starting after base vocab
-                token_id = self.base_vocab_size + i
-                self.target_to_id[target] = token_id
-                self.id_to_target[token_id] = target
-                
-    @property
-    def vocab_size(self) -> int:
-        return self.base_vocab_size + len(self.target_to_id)
-        
-    @property
-    def mask_token_id(self) -> int:
-        """Expose the mask token ID from the underlying ESM tokenizer."""
-        return self.tokenizer.mask_token_id
 
-    def get_target_id(self, target: str) -> int:
-        if target not in self.target_to_id:
-            raise ValueError(f"Unknown target: {target}")
-        return self.target_to_id[target]
-
-    def encode(self, sequence: str, max_length: int = None) -> List[int]:
-        """
-        Encode a sequence into token IDs.
-        Includes BOS and EOS tokens automatically by the underlying tokenizer.
-        """
-        # EsmSequenceTokenizer.encode adds BOS and EOS by default
-        # Based on explore output: [0, 20, ..., 2]. 0 is likely BOS, 2 is EOS.
-        ids = self.tokenizer.encode(sequence)
+def build_input_tensors(
+    fingerprint: Dict[str, Any],
+    binder: Optional[Dict[str, Any]],
+    tokenizer: MimirTokenizer,
+    binder_len: int = 96,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Constructs the full input tensors for one example.
+    
+    Args:
+        fingerprint: Dict with 'sequence', 'structure_tokens', 'sasa', 'position_ids'
+        binder: Dict with 'sequence', and optionally 'structure_tokens' and 'sasa', 
+                or None for inference mode.
+        tokenizer: MimirTokenizer instance.
+        binder_len: Length of the generated binder. Used in inference mode when binder is None.
+    
+    Returns:
+        (seq_tokens, struct_tokens, sasa_tokens, position_ids, attention_mask)
+    """
+    # 1. Fingerprint Processing
+    # Sequence mapping
+    fp_seq_tokens = tokenizer.sequence.encode(fingerprint["sequence"])
+    # encode() adds BOS (0) and EOS (2), we strip them
+    if len(fp_seq_tokens) >= 2 and fp_seq_tokens[0] == tokenizer.seq_bos and fp_seq_tokens[-1] == tokenizer.seq_eos:
+        fp_seq_tokens = fp_seq_tokens[1:-1]
         
-        if max_length is None:
-            return ids
+    fp_seq_tensor = torch.tensor(fp_seq_tokens, dtype=torch.long)
+    fp_struct_tensor = torch.tensor(fingerprint["structure_tokens"], dtype=torch.long)
+    fp_sasa_list = [float(x) for x in fingerprint["sasa"]]
+    sasa_encoded = tokenizer.sasa.encode(fp_sasa_list, add_special_tokens=False)
+    if isinstance(sasa_encoded, torch.Tensor):
+        fp_sasa_tensor = sasa_encoded.clone().detach().to(torch.long)
+    else:
+        fp_sasa_tensor = torch.tensor(sasa_encoded, dtype=torch.long)
+
+    # Position IDs mapping
+    fp_pos_ids = fingerprint["position_ids"]
+    
+    fp_len = len(fp_pos_ids)
+    
+    # 2. Binder Processing
+    if binder is not None:
+        binder_seq = binder["sequence"]
+        binder_len = len(binder_seq)
+        
+        binder_seq_tokens = tokenizer.sequence.encode(binder_seq)
+        if len(binder_seq_tokens) >= 2 and binder_seq_tokens[0] == tokenizer.seq_bos and binder_seq_tokens[-1] == tokenizer.seq_eos:
+            binder_seq_tokens = binder_seq_tokens[1:-1]
             
-        if len(ids) > max_length:
-            # Simple truncation
-            ids = ids[:max_length]
+        binder_seq_tensor = torch.tensor(binder_seq_tokens, dtype=torch.long)
         
-        if len(ids) < max_length:
-            ids = ids + [self.pad_idx] * (max_length - len(ids))
-            
-        return ids
+        if binder.get("structure_tokens") is not None and binder.get("sasa") is not None:
+            # Binder has structure. 
+            # "SASA is withheld on the binder side even if computable" -> Masked
+            binder_struct_tensor = torch.tensor(binder["structure_tokens"], dtype=torch.long)
+            binder_sasa_tensor = torch.full((binder_len,), tokenizer.sasa_mask, dtype=torch.long)
+        else:
+            # Binder without structure
+            binder_struct_tensor = torch.full((binder_len,), tokenizer.struct_mask, dtype=torch.long)
+            binder_sasa_tensor = torch.full((binder_len,), tokenizer.sasa_mask, dtype=torch.long)
+    else:
+        # Inference mode: Binder is None. We use the passed binder_len
+        # to generate fully masked binder tracks.
+        binder_seq_tensor = torch.full((binder_len,), tokenizer.seq_mask, dtype=torch.long)
+        binder_struct_tensor = torch.full((binder_len,), tokenizer.struct_mask, dtype=torch.long)
+        binder_sasa_tensor = torch.full((binder_len,), tokenizer.sasa_mask, dtype=torch.long)
 
-    def decode(self, tokens: List[int]) -> str:
-        # Handle custom tokens if present in the list
-        # Filter them out before decoding with base tokenizer
-        base_tokens = [t for t in tokens if t < self.base_vocab_size]
-        return self.tokenizer.decode(base_tokens)
+    # 3. Concatenation
+    # [BOS] + [protein fingerprint] + [CUT] + [binder] + [EOS]
+    
+    # Sequence track
+    seq_track = torch.cat([
+        torch.tensor([tokenizer.seq_bos], dtype=torch.long),
+        fp_seq_tensor,
+        torch.tensor([tokenizer.cut_seq], dtype=torch.long),
+        binder_seq_tensor,
+        torch.tensor([tokenizer.seq_eos], dtype=torch.long)
+    ])
+    
+    # Structure track
+    struct_track = torch.cat([
+        torch.tensor([tokenizer.struct_pad], dtype=torch.long), # ESM3 uses pad for BOS on structure track
+        fp_struct_tensor,
+        torch.tensor([tokenizer.cut_struct], dtype=torch.long),
+        binder_struct_tensor,
+        torch.tensor([tokenizer.struct_pad], dtype=torch.long) # ESM3 uses pad for EOS on structure track
+    ])
+    
+    # SASA track
+    sasa_track = torch.cat([
+        torch.tensor([tokenizer.sasa_pad], dtype=torch.long), # ESM3 uses pad for BOS on sasa track
+        fp_sasa_tensor,
+        torch.tensor([tokenizer.cut_sasa], dtype=torch.long),
+        binder_sasa_tensor,
+        torch.tensor([tokenizer.sasa_pad], dtype=torch.long) # ESM3 uses pad for EOS on sasa track
+    ])
+    
+    # Position IDs
+    # Fingerprint position IDs + 1000 for CUT + 1001, 1002... for Binder
+    last_fp_pos = fp_pos_ids[-1] if fp_len > 0 else 0
+    cut_pos = last_fp_pos + 1000
+    binder_positions = list(range(cut_pos + 1, cut_pos + 1 + binder_len))
+    eos_pos = binder_positions[-1] + 1 if binder_len > 0 else cut_pos + 1
+    
+    pos_ids = [0] + fp_pos_ids + [cut_pos] + binder_positions + [eos_pos]
+    pos_ids_tensor = torch.tensor(pos_ids, dtype=torch.long)
+    
+    # Attention mask (1s for all real tokens before arbitrary batch padding)
+    attention_mask = torch.ones(len(seq_track), dtype=torch.long)
+    
+    return seq_track, struct_track, sasa_track, pos_ids_tensor, attention_mask
