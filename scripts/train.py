@@ -5,6 +5,7 @@ import sys
 import json
 import random
 import math
+import threading
 from pathlib import Path
 from typing import Dict, Any, Tuple
 
@@ -105,6 +106,10 @@ def r_dir(checkpoint_dir: str) -> Tuple[str | None, int]:
     return os.path.join(checkpoint_dir, f"epoch_{latest_epoch}"), latest_epoch
 
 def _run(args: argparse.Namespace) -> None:
+    # Enable TF32 for matrix multiplications and convolutions
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     
@@ -136,6 +141,10 @@ def _run(args: argparse.Namespace) -> None:
     model = load_model(latest_ckpt_path)
     model.to(device)
     model.train()
+    
+    # Compile the model to reduce overhead
+    logger.info("Compiling model (this may take a moment)...")
+    model = torch.compile(model, mode="reduce-overhead")
     
     # Optimizer & Scheduler
     if args.use_8bit_adam:
@@ -176,6 +185,7 @@ def _run(args: argparse.Namespace) -> None:
             batch_sampler=sampler,
             collate_fn=lambda b: mimir_collate_fn(b, tokenizer),
             num_workers=args.num_workers,
+            persistent_workers=True if args.num_workers > 0 else False,
             pin_memory=True if torch.cuda.is_available() else False
         )
         
@@ -211,7 +221,8 @@ def _run(args: argparse.Namespace) -> None:
             }
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                output = model(**model_kwargs)
+                with torch.backends.cuda.sdp_kernel(enable_flash=True):
+                    output = model(**model_kwargs)
                 
             loss_seq_per_token = criterion(output.sequence_logits.float().view(-1, output.sequence_logits.size(-1)), labels_seq.view(-1))
             loss_seq_per_token = loss_seq_per_token.view(labels_seq.size())
@@ -344,12 +355,13 @@ def _run(args: argparse.Namespace) -> None:
             # Wait! PEFT adapter can be saved, but we need the custom <cut> token embeddings.
             # Best is to just save the trainable parameters using state_dict
             trainable_state_dict = {k: v for k, v in model.state_dict().items() if v.requires_grad}
-            torch.save({
+            state = {
                 "model": trainable_state_dict,
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict()
-            }, save_path / "mimir_checkpoint.pt")
-            logger.info(f"Saved checkpoint to {save_path}")
+            }
+            threading.Thread(target=torch.save, args=(state, save_path / "mimir_checkpoint.pt")).start()
+            logger.info(f"Started async save for checkpoint to {save_path}")
 
 
 # --- Main ---
@@ -376,6 +388,11 @@ def main():
         level=logging.INFO if args.verbose else logging.WARNING, 
         format="%(asctime)s - %(levelname)s - %(message)s"
     )
+    
+    # Export environment variables for optimization right at runtime start
+    os.environ["PYTHONUNBUFFERED"] = "1"
+    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     
     if not os.path.exists(args.associations_csv):
         logger.error(f"File not found: {args.associations_csv}")

@@ -80,6 +80,7 @@ def load_model(checkpoint_path: Optional[str] = None) -> nn.Module:
     """
     # 1. Load the frozen base model
     model = ESM3.from_pretrained("esm3_sm_open_v1")
+    model = model.bfloat16()
     
     # Freeze all base parameters explicitly
     for param in model.parameters():
@@ -117,6 +118,9 @@ def load_model(checkpoint_path: Optional[str] = None) -> nn.Module:
     
     # print trainable parameters summary
     model.print_trainable_parameters()
+    
+    # Enable gradient checkpointing to save VRAM
+    model.gradient_checkpointing_enable()
     
     # 4. Resume from checkpoint if provided
     if checkpoint_path is not None:

@@ -69,9 +69,9 @@ class MimirDataset(Dataset):
 
     def _init_lmdbs(self):
         if self._fp_env is None:
-            self._fp_env = lmdb.open(str(self.fingerprints_lmdb), readonly=True, lock=False)
+            self._fp_env = lmdb.open(str(self.fingerprints_lmdb), readonly=True, lock=False, readahead=True)
         if self._bin_env is None:
-            self._bin_env = lmdb.open(str(self.binders_lmdb), readonly=True, lock=False)
+            self._bin_env = lmdb.open(str(self.binders_lmdb), readonly=True, lock=False, readahead=True)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -180,8 +180,8 @@ class BucketBatchSampler(Sampler):
     def _scan_lengths(self) -> List[int]:
         logger.info("Scanning dataset lengths for bucket batching...")
         lengths = []
-        fp_env = lmdb.open(str(self.dataset.fingerprints_lmdb), readonly=True, lock=False)
-        bin_env = lmdb.open(str(self.dataset.binders_lmdb), readonly=True, lock=False)
+        fp_env = lmdb.open(str(self.dataset.fingerprints_lmdb), readonly=True, lock=False, readahead=True)
+        bin_env = lmdb.open(str(self.dataset.binders_lmdb), readonly=True, lock=False, readahead=True)
         
         skipped = 0
         with fp_env.begin() as fp_txn, bin_env.begin() as bin_txn:
