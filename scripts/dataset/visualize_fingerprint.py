@@ -20,7 +20,7 @@ from pathlib import Path
 import lmdb
 import msgpack
 
-from mimir.structure_features import (
+from mimir.features import (
     TargetFeatures, 
     compute_rsasa, 
     get_smoothed_rsasa, 

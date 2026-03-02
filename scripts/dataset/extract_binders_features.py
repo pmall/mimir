@@ -43,7 +43,7 @@ from esm.tokenization.structure_tokenizer import StructureTokenizer
 from esm.utils import encoding
 from tqdm import tqdm
 
-from mimir.structure_features import BinderFeatures, parse_mmcif_bytes
+from mimir.features import BinderFeatures, parse_mmcif_bytes
 
 # ---
 # Constants

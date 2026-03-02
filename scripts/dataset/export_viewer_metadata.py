@@ -24,7 +24,7 @@ import msgpack
 import numpy as np
 from tqdm import tqdm
 
-from mimir.structure_features import (
+from mimir.features import (
     TargetFeatures,
     compute_rsasa,
     get_fingerprint_mask,

@@ -22,7 +22,7 @@ import msgpack
 import numpy as np
 from tqdm import tqdm
 
-from mimir.structure_features import FingerprintFeatures, TargetFeatures, get_fingerprint_mask
+from mimir.features import FingerprintFeatures, TargetFeatures, get_fingerprint_mask
 
 # ---
 # Constants
