@@ -1,0 +1,131 @@
+"""
+Model definitions and loading utilities for Mimir v2.
+"""
+
+from typing import Optional
+import torch
+import torch.nn as nn
+from esm.models.esm3 import ESM3
+from peft import get_peft_model, LoraConfig
+
+from mimir.tokenizer import CUT_TOKEN_ID_SEQ, CUT_TOKEN_ID_STRUCT, CUT_TOKEN_ID_SASA
+
+
+class ExtendedEmbedding(nn.Module):
+    """
+    Wraps an existing ESM3 embedding layer to seamlessly inject a novel <cut> token
+    embedding, while keeping the original layer's weights frozen.
+    """
+    def __init__(self, original_embedding: nn.Embedding, cut_token_id: int):
+        super().__init__()
+        self.original_embedding = original_embedding
+        self.cut_token_id = cut_token_id
+        
+        # Ensure the original embedding is completely frozen
+        self.original_embedding.weight.requires_grad = False
+        
+        # Create a new, trainable embedding solely for our <cut> token
+        embed_dim = original_embedding.embedding_dim
+        self.cut_embedding = nn.Embedding(1, embed_dim)
+        
+        # Initialize randomly (could also initialize to pad token or similar)
+        nn.init.normal_(self.cut_embedding.weight, mean=0, std=embed_dim ** -0.5)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Routes the indices logically:
+        1. Replace <cut> tokens with 0 in the input stream before querying the frozen embedding.
+        2. Query the original frozen embedding.
+        3. Zero out the frozen embeddings at the <cut> token positions.
+        4. Add in our new, trained <cut> token embeddings.
+        """
+        # Create a boolean mask of where the cut token is (shape: batch, seq_len)
+        cut_mask = (x == self.cut_token_id)
+        
+        # To avoid out-of-bounds queries on the frozen embedding, we temporarily
+        # replace the cut_token_id with 0 (which is safe).
+        safe_x = x.clone()
+        safe_x[cut_mask] = 0
+        
+        # Query the original, frozen embedding (gradients will not pass through here)
+        base_embeds = self.original_embedding(safe_x)
+        
+        # Zero out the output at the cut token positions
+        # Using a mask multiplier is cleaner than explicit indexing for gradients:
+        base_embeds = base_embeds * (~cut_mask).unsqueeze(-1)
+        
+        # Query our new embedding for the cut tokens
+        # We query with index '0' because our cut_embedding only has 1 row
+        cut_embeds = self.cut_embedding(torch.zeros_like(x, dtype=torch.long))
+        
+        # Zero out the output everywhere EXCEPT the cut token positions
+        cut_embeds = cut_embeds * cut_mask.unsqueeze(-1)
+        
+        # Combine them! (Gradient only flows to cut_embeds)
+        return base_embeds + cut_embeds
+
+
+def load_model(checkpoint_path: Optional[str] = None) -> nn.Module:
+    """
+    Loads ESM3 1.4B, attaches LoRA adapters via PEFT (r=16, alpha=32, dropout=0.1), 
+    registers the <cut> token embeddings on all three tracks, and optionally 
+    restores weights from a checkpoint. Returns the model ready for forward passes.
+    
+    Args:
+        checkpoint_path: Optional path to a directory containing PEFT weights and
+                         extended embedding weights.
+                         
+    Returns:
+        The configured model.
+    """
+    # 1. Load the frozen base model
+    model = ESM3.from_pretrained("esm3_sm_open_v1")
+    
+    # Freeze all base parameters explicitly
+    for param in model.parameters():
+        param.requires_grad = False
+        
+    # 2. Inject the custom <cut> token embeddings into the encoder
+    model.encoder.sequence_embed = ExtendedEmbedding(
+        model.encoder.sequence_embed, cut_token_id=CUT_TOKEN_ID_SEQ
+    )
+    model.encoder.structure_tokens_embed = ExtendedEmbedding(
+        model.encoder.structure_tokens_embed, cut_token_id=CUT_TOKEN_ID_STRUCT
+    )
+    model.encoder.sasa_embed = ExtendedEmbedding(
+        model.encoder.sasa_embed, cut_token_id=CUT_TOKEN_ID_SASA
+    )
+    
+    # 3. Apply PEFT LoRA configuration
+    peft_config = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        target_modules=["query", "key", "value", "dense", "proj", "fc1", "fc2", "out_proj"], # targeting all dense/linear layers in attention and FFN
+        lora_dropout=0.1,
+        bias="none",
+        task_type=None,
+    )
+    
+    # This automatically adds the adapters and sets requires_grad=True only for them
+    model = get_peft_model(model, peft_config)
+    
+    # Because we hijacked the embeddings, we need to explicitly ensure their parameters
+    # still require gradients after PEFT initialization (PEFT might freeze non-adapter parts)
+    model.base_model.model.encoder.sequence_embed.cut_embedding.weight.requires_grad = True
+    model.base_model.model.encoder.structure_tokens_embed.cut_embedding.weight.requires_grad = True
+    model.base_model.model.encoder.sasa_embed.cut_embedding.weight.requires_grad = True
+    
+    # print trainable parameters summary
+    model.print_trainable_parameters()
+    
+    # 4. Resume from checkpoint if provided
+    if checkpoint_path is not None:
+        import os
+        # Note: In PEFT, the standard load routine handles the LoRA weights, but we
+        # need to manually handle our extra embeddings.
+        ckpt_state_dict = torch.load(os.path.join(checkpoint_path, "mimir_checkpoint.pt"), map_location="cpu")
+        
+        # Load the LoRA adapters and custom embeddings
+        model.load_state_dict(ckpt_state_dict["model"], strict=False)
+        
+    return model
