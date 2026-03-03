@@ -17,10 +17,8 @@ Output LMDB entry schema (msgpack-serialized dict):
 
 Usage:
     uv run python -m scripts.dataset.extract_binders_features \\
-        --input-csv data/run78-v2/binders_lists/final_binders_96aa.csv \\
-        --structures-db data/run78-v2/structures_pdb \\
-        -o data/run78-v2/features_binders \\
-        [--num-workers 4] [--chunk-size 500] [--verbose]
+        --config data/run78-v2/config.json \\
+        [--num-workers 4] [--chunk-size 500] [--limit N] [-v]
 """
 
 import argparse
@@ -42,6 +40,8 @@ from esm.pretrained import ESM3_structure_encoder_v0
 from esm.tokenization.structure_tokenizer import StructureTokenizer
 from esm.utils import encoding
 from tqdm import tqdm
+
+from mimir.config import load_config
 
 from mimir.features import BinderFeatures, parse_mmcif_bytes
 
@@ -187,22 +187,10 @@ def main() -> None:
         description="Extract structure features for ESM-3"
     )
     parser.add_argument(
-        "--input-csv",
+        "--config",
         type=Path,
         required=True,
-        help="Path to the binder list CSV",
-    )
-    parser.add_argument(
-        "--structures-db",
-        type=Path,
-        required=True,
-        help="Path to the LMDB containing zstd-compressed mmCIFs",
-    )
-    parser.add_argument(
-        "-o", "--output",
-        type=Path,
-        required=True,
-        help="Path to the output LMDB for features",
+        help="Path to config.json",
     )
     parser.add_argument(
         "--num-workers",
@@ -234,18 +222,20 @@ def main() -> None:
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    if not args.input_csv.exists():
-        logger.error(f"Input CSV not found: {args.input_csv}")
+    config = load_config(args.config)
+
+    if not config.binders_merged.exists():
+        logger.error(f"Input CSV not found: {config.binders_merged}")
         sys.exit(1)
 
-    if not args.structures_db.exists():
-        logger.error(f"Structures DB not found: {args.structures_db}")
+    if not config.structures_pdb.exists():
+        logger.error(f"Structures DB not found: {config.structures_pdb}")
         sys.exit(1)
 
     extract_binders_features(
-        input_csv=args.input_csv,
-        structures_db=args.structures_db,
-        output=args.output,
+        input_csv=config.binders_merged,
+        structures_db=config.structures_pdb,
+        output=config.features_binders,
         num_workers=args.num_workers,
         chunk_size=args.chunk_size,
         limit=args.limit,

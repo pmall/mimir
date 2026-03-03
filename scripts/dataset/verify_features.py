@@ -9,8 +9,7 @@ Checks:
 
 Usage:
     uv run python -m scripts.dataset.verify_features \\
-        --input-csv data/run78-v2/binders_lists/final_binders_96aa.csv \\
-        -o data/run78-v2/features_binders
+        --config data/run78-v2/config.json [-v]
 """
 
 import argparse
@@ -22,6 +21,8 @@ from pathlib import Path
 import lmdb
 import msgpack
 from tqdm import tqdm
+
+from mimir.config import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -151,16 +152,10 @@ def main() -> None:
     """Parse CLI arguments and run the features consistency verification."""
     parser = argparse.ArgumentParser(description="Verify CSV to LMDB consistency")
     parser.add_argument(
-        "--input-csv",
+        "--config",
         type=Path,
         required=True,
-        help="Input CSV file",
-    )
-    parser.add_argument(
-        "-o", "--output",
-        type=Path,
-        required=True,
-        help="Output LMDB directory to verify",
+        help="Path to config.json",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -175,15 +170,17 @@ def main() -> None:
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    if not args.input_csv.exists():
-        logger.error(f"Input CSV not found: {args.input_csv}")
+    config = load_config(args.config)
+
+    if not config.binders_merged.exists():
+        logger.error(f"Input CSV not found: {config.binders_merged}")
         sys.exit(1)
 
-    if not args.output.exists():
-        logger.error(f"Output LMDB not found: {args.output}")
+    if not config.features_binders.exists():
+        logger.error(f"Binders LMDB not found: {config.features_binders}")
         sys.exit(1)
 
-    success = verify_consistency(args.input_csv, args.output)
+    success = verify_consistency(config.binders_merged, config.features_binders)
     sys.exit(0 if success else 1)
 
 

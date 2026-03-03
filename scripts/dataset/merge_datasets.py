@@ -7,8 +7,7 @@ files taking priority over later ones.
 
 Usage:
     uv run python -m scripts.dataset.merge_datasets \\
-        data/run78-v2/pdb_binders.csv data/run78-v2/human_binders.csv \\
-        -o data/run78-v2/merged.csv
+        --config data/run78-v2/config.json [-v]
 """
 
 import argparse
@@ -17,6 +16,8 @@ import json
 import logging
 import sys
 from pathlib import Path
+
+from mimir.config import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -84,16 +85,10 @@ def main() -> None:
         description="Merge binder datasets with priority-based deduplication"
     )
     parser.add_argument(
-        "inputs",
-        nargs="+",
-        type=Path,
-        help="Input CSV files (earlier files take priority)",
-    )
-    parser.add_argument(
-        "-o", "--output",
+        "--config",
         type=Path,
         required=True,
-        help="Output CSV path",
+        help="Path to config.json",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -108,12 +103,17 @@ def main() -> None:
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    for path in args.inputs:
+    config = load_config(args.config)
+
+    for path in (config.binders_pdb, config.binders_human, config.binders_viral):
         if not path.exists():
             logger.error(f"Input file not found: {path}")
             sys.exit(1)
 
-    merge_datasets(input_files=args.inputs, output=args.output)
+    merge_datasets(
+        input_files=[config.binders_pdb, config.binders_human, config.binders_viral],
+        output=config.binders_merged,
+    )
 
 
 if __name__ == "__main__":

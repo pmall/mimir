@@ -6,8 +6,8 @@ Small proteins with no mapping are considered as binding sequences.
 
 Usage:
     uv run python -m scripts.dataset.generate_viral_binders \\
-        -o data/run78-v2/binders_lists/viral_binders_96aa.csv \\
-        [--min-length 4] [--max-length 96] [--verbose]
+        --config data/run78-v2/config.json \\
+        [--min-length 4] [--max-length 96] [-v]
 """
 
 import argparse
@@ -17,6 +17,7 @@ import logging
 import sys
 from pathlib import Path
 
+from mimir.config import load_config
 from scripts.dataset.utils import (
     extract_binder_from_empty_mapping,
     extract_binders_from_mapping,
@@ -166,10 +167,10 @@ def main() -> None:
     """Parse CLI arguments and generate the viral binders CSV dataset."""
     parser = argparse.ArgumentParser(description="Generate Viral Binders Dataset")
     parser.add_argument(
-        "-o", "--output",
+        "--config",
         type=Path,
         required=True,
-        help="Output CSV path",
+        help="Path to config.json",
     )
     parser.add_argument(
         "--min-length",
@@ -196,8 +197,10 @@ def main() -> None:
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
+    config = load_config(args.config)
+
     generate_viral_binders(
-        output=args.output,
+        output=config.binders_viral,
         min_len=args.min_length,
         max_len=args.max_length,
         verbose=args.verbose,

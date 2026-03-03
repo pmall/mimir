@@ -121,10 +121,11 @@ def mimir_collate_fn(batch: List[Optional[Dict[str, torch.Tensor]]], tokenizer: 
     Filters None (skipped samples) and pads the batch to a multiple of 64.
     """
     valid_batch = [b for b in batch if b is not None]
+    num_skipped = len(batch) - len(valid_batch)
     
     if not valid_batch:
         # Edge case: entire batch is skipped
-        return {}
+        return {"num_skipped": torch.tensor(num_skipped)}
         
     max_len = max(b["length"] for b in valid_batch)
     padded_len = pad_to_multiple(max_len, 64)
@@ -154,6 +155,7 @@ def mimir_collate_fn(batch: List[Optional[Dict[str, torch.Tensor]]], tokenizer: 
         "sasa": sasa_padded,
         "position_ids": pos_padded,
         "attention_mask": attn_padded,
+        "num_skipped": torch.tensor(num_skipped),
     }
 
 
@@ -214,7 +216,12 @@ class BucketBatchSampler(Sampler):
         self.epoch = epoch
 
     def __iter__(self) -> Iterator[List[int]]:
-        # Define buckets based on multiples of 64
+        # Define buckets based on multiples of 64.
+        # Note on spec 'Shuffle CSV at start of each epoch':
+        # Bucket assignment is deterministic by length. The intra-bucket shuffle 
+        # below, seeded by epoch, shuffles the members within each bucket 
+        # effectively, achieving the equivalent randomization as shuffling the 
+        # CSV samples before bucketing, without mutating the shared samples list.
         buckets: Dict[int, List[int]] = {}
         for idx, length in enumerate(self.lengths):
             if length == -1:

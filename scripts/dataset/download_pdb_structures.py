@@ -11,9 +11,8 @@ partial downloads can be resumed without re-fetching.
 
 Usage:
     uv run python -m scripts.dataset.download_pdb_structures \\
-        --input-csv data/run78-v2/binders_lists/final_binders_96aa.csv \\
-        -o data/run78-v2/structures_pdb \\
-        [--max N] [--concurrency 10] [--verbose]
+        --config data/run78-v2/config.json \\
+        [--max N] [--concurrency 10] [-v]
 """
 
 import argparse
@@ -27,6 +26,8 @@ from pathlib import Path
 import httpx
 import lmdb
 import zstandard as zstd
+
+from mimir.config import load_config
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -273,16 +274,10 @@ def main() -> None:
         description="Download PDB structures from RCSB into LMDB + zstd store"
     )
     parser.add_argument(
-        "--input-csv",
+        "--config",
         type=Path,
         required=True,
-        help="Path to the binders CSV file",
-    )
-    parser.add_argument(
-        "-o", "--output",
-        type=Path,
-        required=True,
-        help="LMDB directory path where the compressed structures will be saved",
+        help="Path to config.json",
     )
     parser.add_argument(
         "--max", type=int, default=None, help="Max entries to download"
@@ -296,19 +291,21 @@ def main() -> None:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    if not args.input_csv.exists():
-        logger.error(f"Input file not found: {args.input_csv}")
-        sys.exit(1)
-
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
+    config = load_config(args.config)
+
+    if not config.binders_pdb.exists():
+        logger.error(f"Input file not found: {config.binders_pdb}")
+        sys.exit(1)
+
     download_pdb_structures(
-        binders_path=args.input_csv,
-        output_path=args.output,
+        binders_path=config.binders_pdb,
+        output_path=config.structures_pdb,
         max_entries=args.max,
         concurrency=args.concurrency,
     )

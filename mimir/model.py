@@ -2,13 +2,18 @@
 Model definitions and loading utilities for Mimir v2.
 """
 
+import logging
+import os
 from typing import Optional
+
 import torch
 import torch.nn as nn
 from esm.models.esm3 import ESM3
 from peft import get_peft_model, LoraConfig
 
 from mimir.tokenizer import CUT_TOKEN_ID_SEQ, CUT_TOKEN_ID_STRUCT, CUT_TOKEN_ID_SASA
+
+logger = logging.getLogger(__name__)
 
 
 class ExtendedEmbedding(nn.Module):
@@ -101,7 +106,7 @@ def load_model(checkpoint_path: Optional[str] = None) -> nn.Module:
     peft_config = LoraConfig(
         r=16,
         lora_alpha=32,
-        target_modules=["query", "key", "value", "dense", "proj", "fc1", "fc2", "out_proj"], # targeting all dense/linear layers in attention and FFN
+        target_modules=["layernorm_qkv.1", "out_proj", "proj", "ffn.1", "ffn.3"], # targeting all linear layers in ESM3 transformer block
         lora_dropout=0.1,
         bias="none",
         task_type=None,
@@ -124,12 +129,16 @@ def load_model(checkpoint_path: Optional[str] = None) -> nn.Module:
     
     # 4. Resume from checkpoint if provided
     if checkpoint_path is not None:
-        import os
         # Note: In PEFT, the standard load routine handles the LoRA weights, but we
         # need to manually handle our extra embeddings.
         ckpt_state_dict = torch.load(os.path.join(checkpoint_path, "mimir_checkpoint.pt"), map_location="cpu")
         
         # Load the LoRA adapters and custom embeddings
-        model.load_state_dict(ckpt_state_dict["model"], strict=False)
+        missing_keys, unexpected_keys = model.load_state_dict(ckpt_state_dict["model"], strict=False)
+        
+        if missing_keys:
+            logger.warning(f"Missing keys when loading checkpoint: {missing_keys}")
+        if unexpected_keys:
+            logger.warning(f"Unexpected keys when loading checkpoint: {unexpected_keys}")
         
     return model

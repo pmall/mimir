@@ -10,8 +10,8 @@ Groups by (target, sequence) pair, outputting a unified schema with JSON sources
 
 Usage:
     uv run python -m scripts.dataset.generate_pdb_binders \\
-        -o data/run78-v2/binders_lists/pdb_binders_96aa.csv \\
-        [--min-length 4] [--max-length 512] [--verbose]
+        --config data/run78-v2/config.json \\
+        [--min-length 4] [--max-length 512] [-v]
 """
 
 import argparse
@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+from mimir.config import load_config
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -485,10 +487,10 @@ def main() -> None:
     """Parse CLI arguments and generate the PDB binders CSV dataset."""
     parser = argparse.ArgumentParser(description="Generate PDB Binders Dataset")
     parser.add_argument(
-        "-o", "--output",
+        "--config",
         type=Path,
         required=True,
-        help="Output CSV path",
+        help="Path to config.json",
     )
     parser.add_argument(
         "--min-length",
@@ -515,8 +517,10 @@ def main() -> None:
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
+    config = load_config(args.config)
+
     generate_pdb_binders(
-        output=args.output,
+        output=config.binders_pdb,
         min_len=args.min_length,
         max_len=args.max_length,
     )

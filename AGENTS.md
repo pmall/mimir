@@ -43,19 +43,38 @@
 - **Levels**: Use `logger.error()` for failures, `logger.warning()` for recoverable issues, `logger.info()` for progress. Never duplicate the same message at two levels.
 - **Noisy libraries**: Silence with `logging.getLogger("httpx").setLevel(logging.WARNING)` etc. at module level.
 
-### CLI Arguments
+### CLI & Config Design
 
-- **Naming**: Use kebab-case (`--input-csv`, `--min-length`).
-- **Input/Output**: Always `required=True`, never provide default paths. Use `-o` shorthand for `--output`.
-- **Verbose**: `-v` / `--verbose`, `action="store_true"`.
-- **Defaults for non-IO params**: Document in help string (e.g. `"default: 4"`).
+All scripts follow a consistent pattern for argument handling:
 
-### Function Signatures
+**1. Centralized Config**
+All dataset paths are managed through a single `config.json` file located at the root of each run directory (e.g., `data/run78-v2/config.json`). This eliminates repetitive path arguments across scripts.
 
-- **Required params first**: `output: Path` before optional params like `min_len: int = 4`.
-- **Match CLI names**: CLI `--min-length` → function param `min_len`.
-- **Execution pattern**: `main()` must only contain argparse, `basicConfig`, input validation, and a single call to the business logic function. All processing logic belongs in a separate function with proper type hints and docstrings.
-- **String encoding**: Use `utf-8` for all `.encode()` calls (LMDB keys, hashing, etc.).
+- Every run directory contains exactly one `config.json` with all dataset paths
+- All scripts that consume or produce dataset paths must accept `--config` instead of individual path arguments
+- Use `load_config()` from `mimir.config`:
+  ```python
+  from mimir.config import load_config
+  
+  config = load_config(args.config)
+  # Access paths via config.features_fingerprints, config.binders_merged, etc.
+  ```
+- **Forbidden**: Individual path arguments like `--fingerprints-lmdb`, `--binders-lmdb`, `--associations-csv` are not allowed
+- **Exceptions**: Training outputs (checkpoints, logs) and test fixtures remain CLI args: `--checkpoint-dir`, `--resume-from`, `-o`
+
+**2. Argument Conventions**
+
+- **Naming**: kebab-case (`--min-length`, `--num-workers`)
+- **Input/Output**: Always `required=True`, never default paths. Use `-o` shorthand for `--output`
+- **Verbose**: `-v` / `--verbose`, `action="store_true"`
+- **Defaults**: Document in help string (e.g. `"default: 4"`)
+
+**3. Function Design**
+
+- **Execution pattern**: `main()` contains only argparse, `basicConfig`, input validation, and a call to the business logic function
+- **Required params first**: `output: Path` before optional params like `min_len: int = 4`
+- **Match CLI names**: CLI `--min-length` → function param `min_len`
+- **String encoding**: Use `utf-8` for all `.encode()` calls (LMDB keys, hashing, etc.)
 
 ### Async Scripts
 
@@ -80,8 +99,3 @@
 - **No redundant comments**: Don't comment what the code already says.
 - **No old-style type comments**: Use proper type hints, not `# type: dict`.
 - **Trailing whitespace**: No trailing blank lines at end of file.
-
-### Default Values
-
-- **Input/output paths**: Never have defaults. Always `required=True`.
-- **Processing params**: Sensible defaults with documented values (e.g. `min_len=4`, `chunk_size=500`).

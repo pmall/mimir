@@ -5,7 +5,7 @@ Tokenizer and dataloader utilities for Mimir v2.
 from typing import Dict, Any, Tuple, Optional, List
 import torch
 import numpy as np
-from esm.models.esm3 import ESM3
+from esm.tokenization import get_esm3_model_tokenizers
 from esm.utils import encoding
 
 # --- Constants for ESM3 Tracks ---
@@ -35,9 +35,14 @@ class MimirTokenizer:
         
         self.struct_pad = getattr(self.structure, "pad_token_id", 4099)
         self.struct_mask = getattr(self.structure, "mask_token_id", 4096)
+        self.struct_bos = getattr(self.structure, "bos_token_id", 4098)
+        self.struct_eos = getattr(self.structure, "eos_token_id", 4097)
         
         self.sasa_pad = getattr(self.sasa, "pad_token_id", 0)
         self.sasa_mask = getattr(self.sasa, "mask_token_id", 0)
+        self.sasa_bos = getattr(self.sasa, "bos_token_id", 0)
+        self.sasa_eos = getattr(self.sasa, "eos_token_id", 0)
+
 
 
 def load_tokenizer() -> MimirTokenizer:
@@ -46,8 +51,8 @@ def load_tokenizer() -> MimirTokenizer:
     Returns the extended tokenizer. Called once at startup.
     Token IDs must be identical across both contexts.
     """
-    model = ESM3.from_pretrained("esm3_sm_open_v1")
-    return MimirTokenizer(model.tokenizers)
+    tokenizers = get_esm3_model_tokenizers("esm3_sm_open_v1")
+    return MimirTokenizer(tokenizers)
 
 
 def build_input_tensors(
@@ -101,7 +106,7 @@ def build_input_tensors(
             
         binder_seq_tensor = torch.tensor(binder_seq_tokens, dtype=torch.long)
         
-        if binder.get("structure_tokens") is not None and binder.get("sasa") is not None:
+        if binder.get("structure_tokens") is not None:
             # Binder has structure. 
             # "SASA is withheld on the binder side even if computable" -> Masked
             binder_struct_tensor = torch.tensor(binder["structure_tokens"], dtype=torch.long)
@@ -131,20 +136,20 @@ def build_input_tensors(
     
     # Structure track
     struct_track = torch.cat([
-        torch.tensor([tokenizer.struct_pad], dtype=torch.long), # ESM3 uses pad for BOS on structure track
+        torch.tensor([tokenizer.struct_bos], dtype=torch.long),
         fp_struct_tensor,
         torch.tensor([tokenizer.cut_struct], dtype=torch.long),
         binder_struct_tensor,
-        torch.tensor([tokenizer.struct_pad], dtype=torch.long) # ESM3 uses pad for EOS on structure track
+        torch.tensor([tokenizer.struct_eos], dtype=torch.long)
     ])
     
     # SASA track
     sasa_track = torch.cat([
-        torch.tensor([tokenizer.sasa_pad], dtype=torch.long), # ESM3 uses pad for BOS on sasa track
+        torch.tensor([tokenizer.sasa_bos], dtype=torch.long),
         fp_sasa_tensor,
         torch.tensor([tokenizer.cut_sasa], dtype=torch.long),
         binder_sasa_tensor,
-        torch.tensor([tokenizer.sasa_pad], dtype=torch.long) # ESM3 uses pad for EOS on sasa track
+        torch.tensor([tokenizer.sasa_eos], dtype=torch.long)
     ])
     
     # Position IDs

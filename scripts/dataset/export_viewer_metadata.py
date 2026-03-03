@@ -5,10 +5,10 @@ Extracts pLDDT, rSASA, smoothed rSASA, mask, and fingerprint details
 from the target features LMDB and saves them in a flat CSV.
 
 Usage:
-    uv run python -m scripts.dataset.export_viewer_metadata \
-        -i data/run78-v2/features_targets.lmdb \
-        -o data/viewer_data.csv \
-        [--max-len 280] [--verbose]
+    uv run python -m scripts.dataset.export_viewer_metadata \\
+        --config data/run78-v2/config.json \\
+        -o data/viewer_data.csv \\
+        [--max-len 280] [--limit N] [-v]
 """
 
 import argparse
@@ -24,6 +24,7 @@ import msgpack
 import numpy as np
 from tqdm import tqdm
 
+from mimir.config import load_config
 from mimir.features import (
     TargetFeatures,
     compute_rsasa,
@@ -172,10 +173,10 @@ def main() -> None:
         description="Export Target LMDB to viewer CSV."
     )
     parser.add_argument(
-        "-i", "--input",
+        "--config",
         type=Path,
         required=True,
-        help="Path to the input features targets LMDB",
+        help="Path to config.json",
     )
     parser.add_argument(
         "-o", "--output",
@@ -208,12 +209,14 @@ def main() -> None:
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    if not args.input.exists():
-        logger.error(f"Input LMDB not found: {args.input}")
+    config = load_config(args.config)
+
+    if not config.features_fingerprints.exists():
+        logger.error(f"Input LMDB not found: {config.features_fingerprints}")
         sys.exit(1)
 
     export_viewer_metadata(
-        input_lmdb=args.input,
+        input_lmdb=config.features_fingerprints,
         output_csv=args.output,
         max_len=args.max_len,
         limit=args.limit,

@@ -1,3 +1,14 @@
+"""
+Train MÍMIR v2 model.
+
+Usage:
+    uv run python -m scripts.train \\
+        --config data/run78-v2/config.json \\
+        --checkpoint-dir checkpoints/ \\
+        [--resume-from checkpoints/epoch_N] \\
+        [--epochs 100] [--batch-size 4] [--peak-lr 1e-4] [-v]
+"""
+
 import argparse
 import logging
 import os
@@ -12,17 +23,11 @@ from typing import Dict, Any, Tuple
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import get_cosine_schedule_with_warmup
 
-try:
-    from mimir.model import load_model
-    from mimir.dataset import MimirDataset, mimir_collate_fn, BucketBatchSampler
-    from mimir.tokenizer import load_tokenizer
-except ImportError:
-    sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-    from mimir.model import load_model
-    from mimir.dataset import MimirDataset, mimir_collate_fn, BucketBatchSampler
-    from mimir.tokenizer import load_tokenizer
+from mimir.config import load_config
+from mimir.model import load_model
+from mimir.dataset import MimirDataset, mimir_collate_fn, BucketBatchSampler
+from mimir.tokenizer import load_tokenizer
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -95,15 +100,8 @@ def apply_mlm_masking(batch: dict, tokenizer: Any) -> Tuple[dict, torch.Tensor, 
 
 # --- Main Training Logic ---
 
-def r_dir(checkpoint_dir: str) -> Tuple[str | None, int]:
-    if not os.path.exists(checkpoint_dir):
-        return None, 0
-    dirs = [d for d in os.listdir(checkpoint_dir) if d.startswith("epoch_")]
-    if not dirs:
-        return None, 0
-    epochs = [int(d.split("_")[1]) for d in dirs]
-    latest_epoch = max(epochs)
-    return os.path.join(checkpoint_dir, f"epoch_{latest_epoch}"), latest_epoch
+def safe_div(a: float, b: float) -> float: 
+    return a / b if b > 0 else 0.0
 
 def _run(args: argparse.Namespace) -> None:
     # Enable TF32 for matrix multiplications and convolutions
@@ -135,7 +133,20 @@ def _run(args: argparse.Namespace) -> None:
     # Checkpoints
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    latest_ckpt_path, start_epoch = r_dir(checkpoint_dir)
+    
+    start_epoch = 0
+    latest_ckpt_path = None
+    if args.resume_from:
+        if not os.path.exists(args.resume_from):
+            logger.error(f"Resume checkpoint path not found: {args.resume_from}")
+            sys.exit(1)
+            
+        latest_ckpt_path = args.resume_from
+        try:
+            start_epoch = int(Path(latest_ckpt_path).name.split("_")[1])
+        except (IndexError, ValueError):
+            logger.warning(f"Could not infer epoch number from {latest_ckpt_path}. Assuming resumed from epoch 0.")
+            start_epoch = 0
     
     logger.info("Loading model...")
     model = load_model(latest_ckpt_path)
@@ -147,23 +158,28 @@ def _run(args: argparse.Namespace) -> None:
     model = torch.compile(model, mode="reduce-overhead")
     
     # Optimizer & Scheduler
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
     if args.use_8bit_adam:
         try:
             import bitsandbytes as bnb
             logger.info("Using 8-bit AdamW optimizer.")
-            optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=args.peak_lr)
+            optimizer = bnb.optim.AdamW8bit(trainable_params, lr=args.peak_lr)
         except ImportError:
             logger.warning("bitsandbytes not found. Falling back to standard AdamW.")
-            optimizer = torch.optim.AdamW(model.parameters(), lr=args.peak_lr)
+            optimizer = torch.optim.AdamW(trainable_params, lr=args.peak_lr)
     else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.peak_lr)
+        optimizer = torch.optim.AdamW(trainable_params, lr=args.peak_lr)
     
     warmup_steps = int(0.05 * total_steps)
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
-    )
+    
+    def lr_lambda(current_step: int):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        min_lr_ratio = 1e-5 / args.peak_lr
+        return min_lr_ratio + 0.5 * (1.0 - min_lr_ratio) * (1.0 + math.cos(math.pi * progress))
+        
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     # Resume opt & scheduler states
     if latest_ckpt_path is not None:
@@ -192,6 +208,7 @@ def _run(args: argparse.Namespace) -> None:
         logger.info(f"Epoch {epoch}/{args.epochs}")
         total_loss, total_true_loss = 0.0, 0.0
         num_batches = 0
+        total_skipped = 0
         
         # Metrics
         m = {
@@ -204,7 +221,13 @@ def _run(args: argparse.Namespace) -> None:
         
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
         for step, batch in enumerate(pbar):
-            if not batch: # skipped
+            skipped_in_batch = batch.get("num_skipped", 0)
+            if isinstance(skipped_in_batch, torch.Tensor):
+                total_skipped += skipped_in_batch.item()
+            else:
+                total_skipped += skipped_in_batch
+                
+            if "sequence" not in batch:
                 continue
                 
             masked_batch, labels_seq, labels_struct = apply_mlm_masking(batch, tokenizer)
@@ -217,7 +240,8 @@ def _run(args: argparse.Namespace) -> None:
             model_kwargs = {
                 "sequence_tokens": tokens["sequence"],
                 "structure_tokens": tokens["structure"],
-                "sasa_tokens": tokens["sasa"]
+                "sasa_tokens": tokens["sasa"],
+                "position_ids": tokens["position_ids"]
             }
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
@@ -306,9 +330,6 @@ def _run(args: argparse.Namespace) -> None:
                 "Loss": f"{loss.item() * args.gradient_accumulation_steps:.4f}"
             })
             
-        def safe_div(a: float, b: float) -> float: 
-            return a / b if b > 0 else 0.0
-        
         # Final metrics
         overall_acc = safe_div(m["overall_correct"], m["overall_total"])
         overall_ppl = math.exp(safe_div(m["overall_loss"], m["overall_total"])) if m["overall_total"] > 0 else 0.0
@@ -327,7 +348,7 @@ def _run(args: argparse.Namespace) -> None:
         
         logger.info(
             f"Epoch {epoch:3d} | lr: {current_lr:.6f} | loss: {avg_loss:.3f} | acc: {overall_acc:.3f} | ppl: {overall_ppl:.2f} | "
-            f"seq_acc: {seq_acc:.3f} | struct_acc: {struct_acc:.3f} | seq_only_acc: {seq_only_acc:.3f}"
+            f"seq_acc: {seq_acc:.3f} | struct_acc: {struct_acc:.3f} | seq_only_acc: {seq_only_acc:.3f} | skipped: {total_skipped}"
         )
         
         log_entry = {
@@ -335,6 +356,7 @@ def _run(args: argparse.Namespace) -> None:
             "loss": avg_loss,
             "lr": current_lr,
             "lambda": args.lam,
+            "skipped_samples": total_skipped,
             "overall_accuracy": overall_acc,
             "overall_perplexity": overall_ppl,
             "seq_accuracy": seq_acc,
@@ -354,7 +376,8 @@ def _run(args: argparse.Namespace) -> None:
             # Save PEFT and embeddings via standard save? 
             # Wait! PEFT adapter can be saved, but we need the custom <cut> token embeddings.
             # Best is to just save the trainable parameters using state_dict
-            trainable_state_dict = {k: v for k, v in model.state_dict().items() if v.requires_grad}
+            trainable_keys = {n for n, p in model.named_parameters() if p.requires_grad}
+            trainable_state_dict = {k: v for k, v in model.state_dict().items() if k in trainable_keys}
             state = {
                 "model": trainable_state_dict,
                 "optimizer": optimizer.state_dict(),
@@ -368,10 +391,9 @@ def _run(args: argparse.Namespace) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Train Mimir v2 task 2")
-    parser.add_argument("--associations-csv", type=str, required=True)
-    parser.add_argument("--fingerprints-lmdb", type=str, required=True)
-    parser.add_argument("--binders-lmdb", type=str, required=True)
+    parser.add_argument("--config", type=Path, required=True, help="Path to config.json")
     parser.add_argument("--checkpoint-dir", type=str, required=True)
+    parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint directory to resume from (e.g., .../epoch_5)")
     parser.add_argument("--epochs", type=int, default=100, help="Total number of epochs to train (default: 100)")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size per worker/device (default: 4)")
     parser.add_argument("--peak-lr", type=float, default=1e-4, help="Peak learning rate after warmup (default: 1e-4)")
@@ -389,14 +411,20 @@ def main():
         format="%(asctime)s - %(levelname)s - %(message)s"
     )
     
+    config = load_config(args.config)
+    
     # Export environment variables for optimization right at runtime start
     os.environ["PYTHONUNBUFFERED"] = "1"
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     
-    if not os.path.exists(args.associations_csv):
-        logger.error(f"File not found: {args.associations_csv}")
+    if not config.binders_merged.exists():
+        logger.error(f"File not found: {config.binders_merged}")
         sys.exit(1)
+        
+    args.associations_csv = str(config.binders_merged)
+    args.fingerprints_lmdb = str(config.features_fingerprints)
+    args.binders_lmdb = str(config.features_binders)
         
     _run(args)
 

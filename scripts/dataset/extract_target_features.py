@@ -7,9 +7,8 @@ Output is msgpack-serialized to an LMDB using the FingerprintFeatures schema.
 
 Usage:
     uv run python -m scripts.dataset.extract_target_features \
-        --tar-file data/UP000005640_9606_HUMAN_v6.tar \
-        -o data/run78-v2/features_targets \
-        [--num-workers 4] [--chunk-size 500] [--verbose]
+        --config data/run78-v2/config.json \\
+        [--num-workers 4] [--chunk-size 500] [--limit N] [-v]
 """
 
 import argparse
@@ -36,6 +35,7 @@ from esm.tokenization.structure_tokenizer import StructureTokenizer
 from esm.utils import encoding
 from tqdm import tqdm
 
+from mimir.config import load_config
 from mimir.features import TargetFeatures, parse_af2_mmcif_bytes
 
 # ---
@@ -133,16 +133,10 @@ def main() -> None:
         description="Extract target features for ESM-3 from AF2 tarball"
     )
     parser.add_argument(
-        "--tar-file",
+        "--config",
         type=Path,
         required=True,
-        help="Path to the AF2 tarball file (e.g., UP000005640_9606_HUMAN_v6.tar)",
-    )
-    parser.add_argument(
-        "-o", "--output",
-        type=Path,
-        required=True,
-        help="Path to the output LMDB for target features",
+        help="Path to config.json",
     )
     parser.add_argument(
         "--num-workers",
@@ -176,13 +170,15 @@ def main() -> None:
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    if not args.tar_file.exists():
-        logger.error(f"Tar file not found: {args.tar_file}")
+    config = load_config(args.config)
+
+    if not config.af2_tar.exists():
+        logger.error(f"Tar file not found: {config.af2_tar}")
         sys.exit(1)
 
     extract_target_features(
-        tar_file=args.tar_file,
-        output=args.output,
+        tar_file=config.af2_tar,
+        output=config.features_targets,
         num_workers=args.num_workers,
         chunk_size=args.chunk_size,
         limit=args.limit,

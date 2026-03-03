@@ -5,10 +5,9 @@ Filters down positions from the target features based on pLDDT and relative SASA
 Maintains continuous synchronous tracks.
 
 Usage:
-    uv run python -m scripts.dataset.create_features_fingerprints \
-        -i data/run78-v2/features_targets \
-        -o data/run78-v2/features_fingerprints \
-        [--max-len 280] [--verbose]
+    uv run python -m scripts.dataset.create_features_fingerprints \\
+        --config data/run78-v2/config.json \\
+        [--max-len 280] [--limit N] [-v]
 """
 
 import argparse
@@ -22,6 +21,7 @@ import msgpack
 import numpy as np
 from tqdm import tqdm
 
+from mimir.config import load_config
 from mimir.features import FingerprintFeatures, TargetFeatures, get_fingerprint_mask
 
 # ---
@@ -101,16 +101,10 @@ def main() -> None:
         description="Filter AlphaFold target features into fingerprints"
     )
     parser.add_argument(
-        "-i", "--input",
+        "--config",
         type=Path,
         required=True,
-        help="Path to the input features targets LMDB",
-    )
-    parser.add_argument(
-        "-o", "--output",
-        type=Path,
-        required=True,
-        help="Path to the output fingerprint LMDB",
+        help="Path to config.json",
     )
     parser.add_argument(
         "--max-len",
@@ -137,13 +131,15 @@ def main() -> None:
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    if not args.input.exists():
-        logger.error(f"Input LMDB not found: {args.input}")
+    config = load_config(args.config)
+
+    if not config.features_targets.exists():
+        logger.error(f"Input LMDB not found: {config.features_targets}")
         sys.exit(1)
 
     create_features_fingerprints(
-        input_lmdb=args.input,
-        output_lmdb=args.output,
+        input_lmdb=config.features_targets,
+        output_lmdb=config.features_fingerprints,
         max_len=args.max_len,
         limit=args.limit,
     )
