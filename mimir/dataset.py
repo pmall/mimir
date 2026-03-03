@@ -4,6 +4,7 @@ Handles LMDB reading, bucket-based batching, and dynamic padding.
 """
 
 import csv
+import json
 import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Tuple, Optional
@@ -73,6 +74,12 @@ class MimirDataset(Dataset):
         if self._bin_env is None:
             self._bin_env = lmdb.open(str(self.binders_lmdb), readonly=True, lock=False, readahead=True)
 
+    def __del__(self):
+        if hasattr(self, '_fp_env') and self._fp_env is not None:
+            self._fp_env.close()
+        if hasattr(self, '_bin_env') and self._bin_env is not None:
+            self._bin_env.close()
+
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -125,7 +132,14 @@ def mimir_collate_fn(batch: List[Optional[Dict[str, torch.Tensor]]], tokenizer: 
     
     if not valid_batch:
         # Edge case: entire batch is skipped
-        return {"num_skipped": torch.tensor(num_skipped)}
+        return {
+            "sequence": torch.empty((0, 0), dtype=torch.long),
+            "structure": torch.empty((0, 0), dtype=torch.long),
+            "sasa": torch.empty((0, 0), dtype=torch.long),
+            "position_ids": torch.empty((0, 0), dtype=torch.long),
+            "attention_mask": torch.empty((0, 0), dtype=torch.long),
+            "num_skipped": torch.tensor(num_skipped),
+        }
         
     max_len = max(b["length"] for b in valid_batch)
     padded_len = pad_to_multiple(max_len, 64)
@@ -167,6 +181,7 @@ class BucketBatchSampler(Sampler):
         self,
         dataset: MimirDataset,
         batch_size: int,
+        cache_path: Optional[Path | str] = None,
         epoch: int = 0
     ):
         self.dataset = dataset
@@ -175,9 +190,24 @@ class BucketBatchSampler(Sampler):
         
         # We need lengths for bucketing. Since lengths depend on FP length (in LMDB),
         # getting exact length for every sample upfront is slow (minutes for large DBs).
-        # We scan it once efficiently or rely on a pre-computed lengths dictionary.
-        # However, for correct bucket batching, we must scan at init.
-        self.lengths = self._scan_lengths()
+        # We cache the lengths to avoid rescanning on every epoch or restart.
+        if cache_path is not None:
+            cache_path = Path(cache_path)
+            if cache_path.is_dir():
+                cache_path = cache_path / "dataset_lengths.json"
+                
+            if cache_path.exists():
+                logger.info(f"Loading cached lengths from {cache_path}")
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    self.lengths = json.load(f)
+            else:
+                self.lengths = self._scan_lengths()
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump(self.lengths, f)
+        else:
+            self.lengths = self._scan_lengths()
+        
+
         
     def _scan_lengths(self) -> List[int]:
         logger.info("Scanning dataset lengths for bucket batching...")

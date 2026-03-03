@@ -8,44 +8,16 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn as nn
-from transformers import get_cosine_schedule_with_warmup
 
 from mimir.model import ExtendedEmbedding
-from mimir.tokenizer import load_tokenizer, CUT_TOKEN_ID_SEQ, CUT_TOKEN_ID_STRUCT
+from mimir.tokenizer import load_tokenizer, CUT_TOKEN_ID_SEQ, CUT_TOKEN_ID_STRUCT, build_input_tensors
+from mimir.dataset import mimir_collate_fn
 from scripts.train import apply_mlm_masking
+import json
+from tests.mocks import MockEsm3, _MockOutput, SEQ_VOCAB_SIZE, STRUCT_VOCAB_SIZE
 
 
 # --- Mocks ---
-
-SEQ_VOCAB_SIZE = CUT_TOKEN_ID_SEQ + 1      # 65
-STRUCT_VOCAB_SIZE = CUT_TOKEN_ID_STRUCT + 1  # 4101
-MOCK_HIDDEN = 16
-
-class _MockOutput:
-    def __init__(self, sequence_logits: torch.Tensor, structure_logits: torch.Tensor) -> None:
-        self.sequence_logits = sequence_logits
-        self.structure_logits = structure_logits
-
-class MockEsm3(nn.Module):
-    def __init__(self, vocab_seq: int = SEQ_VOCAB_SIZE, vocab_struct: int = STRUCT_VOCAB_SIZE) -> None:
-        super().__init__()
-        self.seq_embed = nn.Embedding(vocab_seq, MOCK_HIDDEN)
-        self.struct_embed = nn.Embedding(vocab_struct, MOCK_HIDDEN)
-        self.seq_head = nn.Linear(MOCK_HIDDEN, vocab_seq)
-        self.struct_head = nn.Linear(MOCK_HIDDEN, vocab_struct)
-
-    def forward(
-        self,
-        sequence_tokens: torch.Tensor,
-        structure_tokens: torch.Tensor,
-        sasa_tokens: torch.Tensor,
-        position_ids: torch.Tensor,
-    ) -> _MockOutput:
-        hidden = (
-            self.seq_embed(sequence_tokens.clamp(0, SEQ_VOCAB_SIZE - 1))
-            + self.struct_embed(structure_tokens.clamp(0, STRUCT_VOCAB_SIZE - 1))
-        )
-        return _MockOutput(self.seq_head(hidden), self.struct_head(hidden))
 
 def _masked_ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     valid = labels != -100
@@ -82,34 +54,15 @@ def _load_checkpoint(path: Path, model: nn.Module) -> tuple[int, int]:
 def tokenizer():
     return load_tokenizer()
 
-# We need a small fake batch to test apply_mlm_masking
 @pytest.fixture
-def fake_batch():
-    # Batch size 2, length 10
-    # Let FP be first 4 tokens, CUT is at idx 4, Binder is last 4, EOS is at 9
-    # Pos IDs jump at CUT
-    # Setup such that sequence > 0 to have "real" tokens
-    B, L = 2, 10
-    seq = torch.ones((B, L), dtype=torch.long)
-    struct = torch.ones((B, L), dtype=torch.long)
-    sasa = torch.ones((B, L), dtype=torch.long)
-    
-    # CUT token at idx 4
-    cut_seq = 64
-    cut_struct = 4100
-    cut_sasa = 3
-    
-    seq[:, 4] = cut_seq
-    struct[:, 4] = cut_struct
-    sasa[:, 4] = cut_sasa
-    
-    return {
-        "sequence": seq,
-        "structure": struct,
-        "sasa": sasa,
-        "position_ids": torch.arange(L).unsqueeze(0).expand(B, L),
-        "attention_mask": torch.ones((B, L), dtype=torch.long)
-    }
+def struct_fix():
+    with open("tests/data/struct_0.json", "r") as f:
+        return json.load(f)
+
+@pytest.fixture
+def no_struct_fix():
+    with open("tests/data/no_struct_0.json", "r") as f:
+        return json.load(f)
 
 # --- Tests ---
 
@@ -145,37 +98,44 @@ def test_extended_embedding_gradients():
     assert ext_embed.original_embedding.weight.grad is None
     assert ext_embed.cut_embedding.weight.grad is not None
 
-def test_mlm_masking_rate_and_independence(tokenizer, fake_batch):
+def test_mlm_masking_rate_and_independence(tokenizer, struct_fix):
     """Test: MLM masking rate in [0.25, 0.75], and independent per track"""
-    # Increase batch size / sequence length to test stats
-    B, L = 100, 20
-    fake_batch["sequence"] = torch.ones((B, L), dtype=torch.long)
-    fake_batch["structure"] = torch.ones((B, L), dtype=torch.long)
-    fake_batch["sasa"] = torch.ones((B, L), dtype=torch.long)
-    fake_batch["position_ids"] = torch.arange(L).unsqueeze(0).expand(B, L)
-    fake_batch["attention_mask"] = torch.ones((B, L), dtype=torch.long)
+    fp, binder = struct_fix["fingerprint"], struct_fix["binder"]
+    seq, struct, sasa, pos, attn = build_input_tensors(fp, binder, tokenizer)
     
-    # CUT at idx 8
-    fake_batch["sequence"][:, 8] = tokenizer.cut_seq
+    L = len(seq)
+    item = {
+        "sequence": seq,
+        "structure": struct,
+        "sasa": sasa,
+        "position_ids": pos,
+        "attention_mask": attn,
+        "length": L
+    }
     
-    masked, labels_seq, labels_struct = apply_mlm_masking(fake_batch, tokenizer)
+    B = 100
+    batch = mimir_collate_fn([item] * B, tokenizer)
     
-    # Binder part is indices 9..19.
-    binder_slice = slice(9, 20)
+    masked, labels_seq, labels_struct = apply_mlm_masking(batch, tokenizer)
     
-    # FP part is indices 0..7. Should never be masked.
-    fp_slice = slice(0, 8)
+    # FP is 1..1+fp_len, so 0..1+fp_len (including BOS and CUT) shouldn't be masked.
+    fp_len = len(fp["position_ids"])
+    fp_slice = slice(0, 1 + fp_len + 1)
+    
+    # Binder part is from exactly right after CUT until just before EOS
+    # EOS is at L-1, so binder ends at L-1.
+    binder_slice = slice(1 + fp_len + 1, L - 1)
     
     # 1. FP is never masked (labels are -100)
     assert torch.all(labels_seq[:, fp_slice] == -100)
     assert torch.all(labels_struct[:, fp_slice] == -100)
     
     # 2. Check masking rate on binder
-    # A label != -100 means it was chosen for masking
     seq_masked_count = (labels_seq[:, binder_slice] != -100).sum().item()
     struct_masked_count = (labels_struct[:, binder_slice] != -100).sum().item()
     
-    total_binder_tokens = B * 11
+    binder_len = (L - 1) - (1 + fp_len + 1)
+    total_binder_tokens = B * binder_len
     seq_rate = seq_masked_count / total_binder_tokens
     struct_rate = struct_masked_count / total_binder_tokens
     
@@ -186,7 +146,6 @@ def test_mlm_masking_rate_and_independence(tokenizer, fake_batch):
     # 3. Independence: they shouldn't be exactly the same mask
     same_mask = (labels_seq[:, binder_slice] != -100) == (labels_struct[:, binder_slice] != -100)
     overlap_rate = same_mask.float().mean().item()
-    # If independent with uniform [0.25, 0.75], expected overlap is around 1/2.
     # Should definitely not be 1.0.
     assert overlap_rate < 0.95
 
@@ -265,14 +224,20 @@ def test_checkpoint_save_reload_round_trip(tmp_path):
         assert torch.allclose(p1, p2), f"Parameter {n1} mismatch"
 
 def test_lr_schedule_warmup_and_decay():
-    """Test: LR schedule warmup increases, decay decreases"""
+    """Test: LR schedule warmup increases, decay decreases to 1e-5"""
     model = MockEsm3()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    peak_lr = 1e-4
+    optimizer = torch.optim.AdamW(model.parameters(), lr=peak_lr)
     total_steps, warmup_steps = 100, 10
     
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
-    )
+    def lr_lambda(current_step: int):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        min_lr_ratio = 1e-5 / peak_lr
+        return min_lr_ratio + 0.5 * (1.0 - min_lr_ratio) * (1.0 + math.cos(math.pi * progress))
+        
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     lrs = []
     for _ in range(total_steps):
@@ -284,3 +249,6 @@ def test_lr_schedule_warmup_and_decay():
     assert lrs[0] < lrs[5] < lrs[warmup_steps]
     # Decay decreases
     assert lrs[warmup_steps] > lrs[50] > lrs[-1]
+    # Check that it decays to exactly 1e-5
+    final_lr = scheduler.get_last_lr()[0]
+    assert math.isclose(final_lr, 1e-5, rel_tol=1e-5)

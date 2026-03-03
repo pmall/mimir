@@ -41,8 +41,7 @@ class ExtendedEmbedding(nn.Module):
         Routes the indices logically:
         1. Replace <cut> tokens with 0 in the input stream before querying the frozen embedding.
         2. Query the original frozen embedding.
-        3. Zero out the frozen embeddings at the <cut> token positions.
-        4. Add in our new, trained <cut> token embeddings.
+        3. Replace the embeddings at the <cut> token positions with our new embedding.
         """
         # Create a boolean mask of where the cut token is (shape: batch, seq_len)
         cut_mask = (x == self.cut_token_id)
@@ -55,19 +54,11 @@ class ExtendedEmbedding(nn.Module):
         # Query the original, frozen embedding (gradients will not pass through here)
         base_embeds = self.original_embedding(safe_x)
         
-        # Zero out the output at the cut token positions
-        # Using a mask multiplier is cleaner than explicit indexing for gradients:
-        base_embeds = base_embeds * (~cut_mask).unsqueeze(-1)
-        
-        # Query our new embedding for the cut tokens
-        # We query with index '0' because our cut_embedding only has 1 row
-        cut_embeds = self.cut_embedding(torch.zeros_like(x, dtype=torch.long))
-        
-        # Zero out the output everywhere EXCEPT the cut token positions
-        cut_embeds = cut_embeds * cut_mask.unsqueeze(-1)
-        
-        # Combine them! (Gradient only flows to cut_embeds)
-        return base_embeds + cut_embeds
+        result = base_embeds.clone()
+        if cut_mask.any():
+            result[cut_mask] = self.cut_embedding.weight[0]
+            
+        return result
 
 
 def load_model(checkpoint_path: Optional[str] = None) -> nn.Module:
@@ -121,8 +112,9 @@ def load_model(checkpoint_path: Optional[str] = None) -> nn.Module:
     model.base_model.model.encoder.structure_tokens_embed.cut_embedding.weight.requires_grad = True
     model.base_model.model.encoder.sasa_embed.cut_embedding.weight.requires_grad = True
     
-    # print trainable parameters summary
-    model.print_trainable_parameters()
+    # print trainable parameters summary if logger is at info or below
+    if logger.getEffectiveLevel() <= logging.INFO:
+        model.print_trainable_parameters()
     
     # Enable gradient checkpointing to save VRAM
     model.gradient_checkpointing_enable()

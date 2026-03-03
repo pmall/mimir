@@ -100,3 +100,38 @@ def test_epoch_shuffling_is_reproducible(tokenizer, dataset):
 
     assert batches_a1 == batches_a2
     assert batches_a1 != batches_b
+
+def test_bucket_batching_less_padding_than_random(tokenizer, dataset):
+    """Test: Bucket batching produces fewer or equal total pad tokens than random batching."""
+    import random
+    
+    # 1. Bucket batching padding
+    bucket_sampler = BucketBatchSampler(dataset, batch_size=2)
+    bucket_batches = list(iter(bucket_sampler))
+    
+    bucket_pad_tokens = 0
+    for batch_indices in bucket_batches:
+        items = [dataset[i] for i in batch_indices]
+        batch = mimir_collate_fn(items, tokenizer)
+        L = batch["attention_mask"].sum(dim=1)
+        pad = batch["sequence"].shape[1] * len(L) - L.sum().item()
+        bucket_pad_tokens += pad
+        
+    # 2. Random batching padding
+    valid_indices = [i for i, size in enumerate(bucket_sampler.lengths) if size > 0]
+    random.seed(42)
+    shuffled_indices = valid_indices.copy()
+    random.shuffle(shuffled_indices)
+    
+    random_batches = [shuffled_indices[i:i+2] for i in range(0, len(shuffled_indices), 2)]
+    
+    random_pad_tokens = 0
+    for batch_indices in random_batches:
+        items = [dataset[i] for i in batch_indices]
+        batch = mimir_collate_fn(items, tokenizer)
+        L = batch["attention_mask"].sum(dim=1)
+        pad = batch["sequence"].shape[1] * len(L) - L.sum().item()
+        random_pad_tokens += pad
+        
+    # Assert
+    assert bucket_pad_tokens <= random_pad_tokens

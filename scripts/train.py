@@ -23,6 +23,8 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+import bitsandbytes as bnb
+
 from mimir.config import load_config
 from mimir.model import load_model
 from mimir.dataset import MimirDataset, mimir_collate_fn, BucketBatchSampler
@@ -121,20 +123,26 @@ def _run(args: argparse.Namespace) -> None:
     )
     logger.info(f"Total samples: {len(dataset)}")
     
+    # Checkpoints
+    checkpoint_dir = Path(args.checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
     # Calculate steps first
     # Estimate total batches using math.ceil(len / batch_size) because bucket length is variable
-    sampler = BucketBatchSampler(dataset=dataset, batch_size=args.batch_size, epoch=1)
+    sampler = BucketBatchSampler(
+        dataset=dataset, 
+        batch_size=args.batch_size, 
+        cache_path=checkpoint_dir,
+        epoch=1
+    )
     # len(sampler) returns estimated batches
     steps_per_epoch = len(sampler) // args.gradient_accumulation_steps
     total_steps = args.epochs * steps_per_epoch
     logger.info(f"Estimated steps per epoch: {steps_per_epoch}, total steps: {total_steps}")
     
-    # Checkpoints
-    checkpoint_dir = Path(args.checkpoint_dir)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    
     start_epoch = 0
     latest_ckpt_path = None
+    training_state = None
     
     log_file = checkpoint_dir / "training_log.jsonl"
     
@@ -150,8 +158,15 @@ def _run(args: argparse.Namespace) -> None:
                     logger.error(f"Log indicates epoch {last_epoch} but checkpoint not found: {ckpt_path}")
                     sys.exit(1)
                 latest_ckpt_path = str(ckpt_path)
-                start_epoch = last_epoch
-                logger.info(f"Resuming from epoch {start_epoch}")
+    
+    if latest_ckpt_path is not None:
+        training_state_path = os.path.join(latest_ckpt_path, "training_state.pt")
+        if os.path.exists(training_state_path):
+            training_state = torch.load(training_state_path, map_location="cpu", weights_only=False)
+            start_epoch = training_state.get("epoch", 0)
+            logger.info(f"Resuming from epoch {start_epoch}")
+        else:
+            logger.warning(f"No training_state.pt found in {latest_ckpt_path}, starting from epoch 0")
     
     logger.info("Loading model...")
     model = load_model(latest_ckpt_path)
@@ -165,13 +180,8 @@ def _run(args: argparse.Namespace) -> None:
     # Optimizer & Scheduler
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     if args.use_8bit_adam:
-        try:
-            import bitsandbytes as bnb
-            logger.info("Using 8-bit AdamW optimizer.")
-            optimizer = bnb.optim.AdamW8bit(trainable_params, lr=args.peak_lr)
-        except ImportError:
-            logger.warning("bitsandbytes not found. Falling back to standard AdamW.")
-            optimizer = torch.optim.AdamW(trainable_params, lr=args.peak_lr)
+        logger.info("Using 8-bit AdamW optimizer.")
+        optimizer = bnb.optim.AdamW8bit(trainable_params, lr=args.peak_lr)
     else:
         optimizer = torch.optim.AdamW(trainable_params, lr=args.peak_lr)
     
@@ -187,13 +197,11 @@ def _run(args: argparse.Namespace) -> None:
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     # Resume opt & scheduler states
-    if latest_ckpt_path is not None:
-        optimizer_path = os.path.join(latest_ckpt_path, "optimizer.pt")
-        scheduler_path = os.path.join(latest_ckpt_path, "scheduler.pt")
-        if os.path.exists(optimizer_path):
-            optimizer.load_state_dict(torch.load(optimizer_path, map_location="cpu"))
-        if os.path.exists(scheduler_path):
-            scheduler.load_state_dict(torch.load(scheduler_path, map_location="cpu"))
+    if training_state is not None:
+        if "optimizer" in training_state:
+            optimizer.load_state_dict(training_state["optimizer"])
+        if "scheduler" in training_state:
+            scheduler.load_state_dict(training_state["scheduler"])
         logger.info(f"Resumed optimizer and scheduler from epoch {start_epoch}")
     
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
@@ -249,8 +257,7 @@ def _run(args: argparse.Namespace) -> None:
             }
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                with torch.backends.cuda.sdp_kernel(enable_flash=True):
-                    output = model(**model_kwargs)
+                output = model(**model_kwargs)
                 
             loss_seq_per_token = criterion(output.sequence_logits.float().view(-1, output.sequence_logits.size(-1)), labels_seq.view(-1))
             loss_seq_per_token = loss_seq_per_token.view(labels_seq.size())
@@ -285,7 +292,7 @@ def _run(args: argparse.Namespace) -> None:
             loss.backward()
             
             if (step + 1) % args.gradient_accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -385,10 +392,15 @@ def _run(args: argparse.Namespace) -> None:
             cut_embeddings = {k: model.state_dict()[k] for k in cut_embedding_keys}
             torch.save(cut_embeddings, save_path / "cut_embeddings.pt")
             
+            training_state = {
+                "epoch": epoch,
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict()
+            }
+            
             threading.Thread(target=model.save_pretrained, args=(save_path,)).start()
             
-            threading.Thread(target=torch.save, args=(optimizer.state_dict(), save_path / "optimizer.pt")).start()
-            threading.Thread(target=torch.save, args=(scheduler.state_dict(), save_path / "scheduler.pt")).start()
+            threading.Thread(target=torch.save, args=(training_state, save_path / "training_state.pt")).start()
             
             logger.info(f"Started async save for checkpoint to {save_path}")
 
@@ -417,11 +429,6 @@ def main():
     )
     
     config = load_config(args.config)
-    
-    # Export environment variables for optimization right at runtime start
-    os.environ["PYTHONUNBUFFERED"] = "1"
-    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     
     if not config.binders_merged.exists():
         logger.error(f"File not found: {config.binders_merged}")

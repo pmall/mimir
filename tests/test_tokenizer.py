@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from mimir.tokenizer import load_tokenizer, build_input_tensors, MimirTokenizer
+from mimir.dataset import mimir_collate_fn
 
 
 # --- Fixture Loading ---
@@ -21,12 +22,12 @@ def tokenizer():
     return load_tokenizer()
 
 @pytest.fixture
-def struct_fix(request):
+def struct_fix():
     with open(TEST_DATA_DIR / "struct_0.json", "r") as f:
         return json.load(f)
 
 @pytest.fixture
-def no_struct_fix(request):
+def no_struct_fix():
     with open(TEST_DATA_DIR / "no_struct_0.json", "r") as f:
         return json.load(f)
 
@@ -145,7 +146,6 @@ def test_5_position_ids_are_correct(tokenizer, struct_fix):
 
 def test_8_padding_applied_after_eos(tokenizer, struct_fix):
     """Test 8: Padding is applied after EOS"""
-    from mimir.dataset import mimir_collate_fn
     fp, binder = struct_fix["fingerprint"], struct_fix["binder"]
     seq, struct, sasa, pos, attn = build_input_tensors(fp, binder, tokenizer)
     

@@ -6,7 +6,6 @@ from typing import Dict, Any, Tuple, Optional, List
 import torch
 import numpy as np
 from esm.tokenization import get_esm3_model_tokenizers
-from esm.utils import encoding
 
 # --- Constants for ESM3 Tracks ---
 # Sequence vocab is 64 tokens explicitly defined.
@@ -38,6 +37,8 @@ class MimirTokenizer:
         self.struct_bos = getattr(self.structure, "bos_token_id", 4098)
         self.struct_eos = getattr(self.structure, "eos_token_id", 4097)
         
+        # Note: In ESM3, the SASA tokenizer doesn't have distinct special tokens.
+        # pad, mask, bos, and eos all genuinely resolve to 0.
         self.sasa_pad = getattr(self.sasa, "pad_token_id", 0)
         self.sasa_mask = getattr(self.sasa, "mask_token_id", 0)
         self.sasa_bos = getattr(self.sasa, "bos_token_id", 0)
