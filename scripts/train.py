@@ -5,7 +5,6 @@ Usage:
     uv run python -m scripts.train \\
         --config data/run78-v2/config.json \\
         --checkpoint-dir checkpoints/ \\
-        [--resume-from checkpoints/epoch_N] \\
         [--epochs 100] [--batch-size 4] [--peak-lr 1e-4] [-v]
 """
 
@@ -136,17 +135,23 @@ def _run(args: argparse.Namespace) -> None:
     
     start_epoch = 0
     latest_ckpt_path = None
-    if args.resume_from:
-        if not os.path.exists(args.resume_from):
-            logger.error(f"Resume checkpoint path not found: {args.resume_from}")
-            sys.exit(1)
-            
-        latest_ckpt_path = args.resume_from
-        try:
-            start_epoch = int(Path(latest_ckpt_path).name.split("_")[1])
-        except (IndexError, ValueError):
-            logger.warning(f"Could not infer epoch number from {latest_ckpt_path}. Assuming resumed from epoch 0.")
-            start_epoch = 0
+    
+    log_file = checkpoint_dir / "training_log.jsonl"
+    
+    if log_file.exists():
+        with open(log_file, "r") as f:
+            lines = f.readlines()
+        if lines:
+            last_log = json.loads(lines[-1])
+            last_epoch = last_log.get("epoch", 0)
+            if last_epoch > 0:
+                ckpt_path = checkpoint_dir / f"epoch_{last_epoch}"
+                if not ckpt_path.exists():
+                    logger.error(f"Log indicates epoch {last_epoch} but checkpoint not found: {ckpt_path}")
+                    sys.exit(1)
+                latest_ckpt_path = str(ckpt_path)
+                start_epoch = last_epoch
+                logger.info(f"Resuming from epoch {start_epoch}")
     
     logger.info("Loading model...")
     model = load_model(latest_ckpt_path)
@@ -183,16 +188,15 @@ def _run(args: argparse.Namespace) -> None:
     
     # Resume opt & scheduler states
     if latest_ckpt_path is not None:
-        state_path = os.path.join(latest_ckpt_path, "training_state.pt")
-        if os.path.exists(state_path):
-            state = torch.load(state_path, map_location="cpu")
-            optimizer.load_state_dict(state["optimizer"])
-            scheduler.load_state_dict(state["scheduler"])
-            logger.info(f"Resumed from epoch {start_epoch}")
+        optimizer_path = os.path.join(latest_ckpt_path, "optimizer.pt")
+        scheduler_path = os.path.join(latest_ckpt_path, "scheduler.pt")
+        if os.path.exists(optimizer_path):
+            optimizer.load_state_dict(torch.load(optimizer_path, map_location="cpu"))
+        if os.path.exists(scheduler_path):
+            scheduler.load_state_dict(torch.load(scheduler_path, map_location="cpu"))
+        logger.info(f"Resumed optimizer and scheduler from epoch {start_epoch}")
     
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
-    
-    log_file = Path("mimir_v2_training_log.jsonl")
     
     for epoch in range(start_epoch + 1, args.epochs + 1):
         sampler.set_epoch(epoch)
@@ -373,17 +377,19 @@ def _run(args: argparse.Namespace) -> None:
             save_path = checkpoint_dir / f"epoch_{epoch}"
             save_path.mkdir(parents=True, exist_ok=True)
             
-            # Save PEFT and embeddings via standard save? 
-            # Wait! PEFT adapter can be saved, but we need the custom <cut> token embeddings.
-            # Best is to just save the trainable parameters using state_dict
-            trainable_keys = {n for n, p in model.named_parameters() if p.requires_grad}
-            trainable_state_dict = {k: v for k, v in model.state_dict().items() if k in trainable_keys}
-            state = {
-                "model": trainable_state_dict,
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict()
-            }
-            threading.Thread(target=torch.save, args=(state, save_path / "mimir_checkpoint.pt")).start()
+            cut_embedding_keys = [
+                "base_model.model.encoder.sequence_embed.cut_embedding.weight",
+                "base_model.model.encoder.structure_tokens_embed.cut_embedding.weight",
+                "base_model.model.encoder.sasa_embed.cut_embedding.weight",
+            ]
+            cut_embeddings = {k: model.state_dict()[k] for k in cut_embedding_keys}
+            torch.save(cut_embeddings, save_path / "cut_embeddings.pt")
+            
+            threading.Thread(target=model.save_pretrained, args=(save_path,)).start()
+            
+            threading.Thread(target=torch.save, args=(optimizer.state_dict(), save_path / "optimizer.pt")).start()
+            threading.Thread(target=torch.save, args=(scheduler.state_dict(), save_path / "scheduler.pt")).start()
+            
             logger.info(f"Started async save for checkpoint to {save_path}")
 
 
@@ -393,12 +399,11 @@ def main():
     parser = argparse.ArgumentParser(description="Train Mimir v2 task 2")
     parser.add_argument("--config", type=Path, required=True, help="Path to config.json")
     parser.add_argument("--checkpoint-dir", type=str, required=True)
-    parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint directory to resume from (e.g., .../epoch_5)")
     parser.add_argument("--epochs", type=int, default=100, help="Total number of epochs to train (default: 100)")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size per worker/device (default: 4)")
     parser.add_argument("--peak-lr", type=float, default=1e-4, help="Peak learning rate after warmup (default: 1e-4)")
     parser.add_argument("--lam", type=float, default=0.5, help="Lambda penalty for masks (default: 0.5)")
-    parser.add_argument("--checkpoint-every", type=int, default=5, help="Save a checkpoint every N epochs (default: 5)")
+    parser.add_argument("--checkpoint-every", type=int, default=1, help="Save a checkpoint every N epochs (default: 1)")
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1, help="Number of gradient accumulation steps (default: 1)")
     parser.add_argument("--use-8bit-adam", action="store_true", help="Use 8-bit AdamW optimizer if available (default: False)")
     parser.add_argument("--num-workers", type=int, default=2, help="Number of dataloader workers (default: 2)")

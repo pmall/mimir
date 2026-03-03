@@ -129,12 +129,16 @@ def load_model(checkpoint_path: Optional[str] = None) -> nn.Module:
     
     # 4. Resume from checkpoint if provided
     if checkpoint_path is not None:
-        # Note: In PEFT, the standard load routine handles the LoRA weights, but we
-        # need to manually handle our extra embeddings.
-        ckpt_state_dict = torch.load(os.path.join(checkpoint_path, "mimir_checkpoint.pt"), map_location="cpu")
+        model.from_pretrained(checkpoint_path)
         
-        # Load the LoRA adapters and custom embeddings
-        missing_keys, unexpected_keys = model.load_state_dict(ckpt_state_dict["model"], strict=False)
+        cut_embedding_keys = [
+            "base_model.model.encoder.sequence_embed.cut_embedding.weight",
+            "base_model.model.encoder.structure_tokens_embed.cut_embedding.weight",
+            "base_model.model.encoder.sasa_embed.cut_embedding.weight",
+        ]
+        cut_embeddings = torch.load(os.path.join(checkpoint_path, "cut_embeddings.pt"), map_location="cpu")
+        
+        missing_keys, unexpected_keys = model.load_state_dict(cut_embeddings, strict=False)
         
         if missing_keys:
             logger.warning(f"Missing keys when loading checkpoint: {missing_keys}")
