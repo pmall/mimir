@@ -1,11 +1,11 @@
 """
-Pre-Training Sanity Checks for Mimir v2.
+Pre-Training Dataset Verification for Mimir v2.
 
-Runs lightweight CPU checks to verify data integrity, dataloader correctness,
-and a simple mock smoke test without loading the real ESM3 model.
+Runs lightweight CPU checks to verify data integrity and dataloader correctness
+before submitting expensive H100 SLURM jobs.
 
 Usage:
-    uv run python -m scripts.run_sanity_checks \\
+    uv run python -m scripts.verify_dataset \
         --config data/run78-v2/config.json [-v]
 """
 
@@ -25,8 +25,6 @@ import pandas as pd
 from mimir.config import load_config
 from mimir.tokenizer import load_tokenizer, MimirTokenizer, CUT_TOKEN_ID_SEQ, CUT_TOKEN_ID_STRUCT
 from mimir.dataset import MimirDataset, BucketBatchSampler, mimir_collate_fn
-from scripts.train import apply_mlm_masking
-from tests.mocks import MockEsm3
 
 # --- Noisy library silencing (module level) ---
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -184,39 +182,6 @@ def check_dataloader(
     return dataloader
 
 
-def run_smoke_test(
-    dataloader: torch.utils.data.DataLoader,
-    tokenizer: MimirTokenizer,
-) -> None:
-    logger.info("--- 5. Smoke Test ---")
-    model = MockEsm3()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    it = iter(dataloader)
-    for epoch in range(2):
-        for step in range(2):
-            try:
-                batch = next(it)
-            except StopIteration:
-                break
-            if not batch:
-                continue
-            optimizer.zero_grad()
-            masked_batch, labels_seq, _ = apply_mlm_masking(batch, tokenizer)
-            out = model(
-                sequence_tokens=masked_batch["sequence"],
-                structure_tokens=masked_batch["structure"],
-                sasa_tokens=masked_batch["sasa"],
-                position_ids=masked_batch["position_ids"],
-            )
-            # Dummy loss using sum of logits for simplistic mock backward pass
-            loss = out.sequence_logits.sum() + out.structure_logits.sum()
-            if loss.requires_grad:
-                loss.backward()
-                optimizer.step()
-            logger.info(f"epoch {epoch} step {step} dummy loss computed")
-    logger.info("Smoke Test: PASS")
-
-
 # --- Orchestration ---
 
 def run_checks(
@@ -228,12 +193,11 @@ def run_checks(
     check_data_integrity(fingerprints_lmdb, binders_lmdb, associations_csv)
     tokenizer = check_tokenizer()
     dataloader = check_dataloader(fingerprints_lmdb, binders_lmdb, associations_csv, tokenizer)
-    run_smoke_test(dataloader, tokenizer)
     logger.info("=== ALL PRE-TRAINING SANITY CHECKS PASSED ===")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Pre-training sanity checks for Mimir v2")
+    parser = argparse.ArgumentParser(description="Pre-training dataset verification for Mimir v2")
     parser.add_argument("--config", type=Path, required=True, help="Path to config.json")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()

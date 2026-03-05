@@ -34,7 +34,7 @@ def no_struct_fix():
 
 # --- Tests ---
 
-def test_1_tokenizer_cut_token(tokenizer: MimirTokenizer):
+def test_tokenizer_cut_token(tokenizer: MimirTokenizer):
     """Test 1: CUT token registration + explicit amino acid collision check"""
     assert tokenizer.cut_seq is not None
     assert tokenizer.cut_struct is not None
@@ -56,7 +56,7 @@ def test_1_tokenizer_cut_token(tokenizer: MimirTokenizer):
     assert t2.cut_sasa == tokenizer.cut_sasa
 
 
-def test_2_binder_with_structure(tokenizer, struct_fix):
+def test_binder_with_structure(tokenizer, struct_fix):
     """Test 2: Binder with structure: correct tensor shape and track population"""
     fp, binder = struct_fix["fingerprint"], struct_fix["binder"]
     seq, struct, sasa, pos, attn = build_input_tensors(fp, binder, tokenizer)
@@ -91,7 +91,7 @@ def test_2_binder_with_structure(tokenizer, struct_fix):
     assert sasa[cut_idx] == tokenizer.cut_sasa
 
 
-def test_3_binder_without_structure(tokenizer, no_struct_fix):
+def test_binder_without_structure(tokenizer, no_struct_fix):
     """Test 3: Binder without structure: correct track population"""
     fp, binder = no_struct_fix["fingerprint"], no_struct_fix["binder"]
     seq, struct, sasa, pos, attn = build_input_tensors(fp, binder, tokenizer)
@@ -105,7 +105,7 @@ def test_3_binder_without_structure(tokenizer, no_struct_fix):
     assert torch.all(sasa[bin_slice] == tokenizer.sasa_mask)
 
 
-def test_4_inference_mode_fully_masked(tokenizer, struct_fix):
+def test_inference_mode_fully_masked(tokenizer, struct_fix):
     """Test 4: Inference mode: fully masked binder"""
     fp = struct_fix["fingerprint"]
     seq, struct, sasa, pos, attn = build_input_tensors(fp, None, tokenizer)
@@ -122,7 +122,7 @@ def test_4_inference_mode_fully_masked(tokenizer, struct_fix):
     assert seq[cut_idx] == tokenizer.cut_seq
 
 
-def test_5_position_ids_are_correct(tokenizer, struct_fix):
+def test_position_ids_are_correct(tokenizer, struct_fix):
     """Test 5: Position IDs are correct"""
     fp, binder = struct_fix["fingerprint"], struct_fix["binder"]
     seq, struct, sasa, pos, attn = build_input_tensors(fp, binder, tokenizer)
@@ -144,7 +144,7 @@ def test_5_position_ids_are_correct(tokenizer, struct_fix):
     assert pos[-1] == pos[-2] + 1
 
 
-def test_8_padding_applied_after_eos(tokenizer, struct_fix):
+def test_padding_applied_after_eos(tokenizer, struct_fix):
     """Test 8: Padding is applied after EOS"""
     fp, binder = struct_fix["fingerprint"], struct_fix["binder"]
     seq, struct, sasa, pos, attn = build_input_tensors(fp, binder, tokenizer)
@@ -181,7 +181,7 @@ def test_8_padding_applied_after_eos(tokenizer, struct_fix):
     assert torch.all(attn_padded[L:] == 0)
 
 
-def test_9_maximum_length_sample_does_not_overflow(tokenizer, struct_fix):
+def test_maximum_length_sample_does_not_overflow(tokenizer, struct_fix):
     """Test 9: Maximum length sample does not overflow"""
     fp, binder = struct_fix["fingerprint"], struct_fix["binder"]
     # Mutate to max size

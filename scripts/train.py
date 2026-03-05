@@ -23,7 +23,11 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-import bitsandbytes as bnb
+try:
+    import bitsandbytes as bnb
+    HAS_BNB = True
+except ImportError:
+    HAS_BNB = False
 
 from mimir.config import load_config
 from mimir.model import load_model
@@ -163,10 +167,18 @@ def _run(args: argparse.Namespace) -> None:
         training_state_path = os.path.join(latest_ckpt_path, "training_state.pt")
         if os.path.exists(training_state_path):
             training_state = torch.load(training_state_path, map_location="cpu", weights_only=False)
-            start_epoch = training_state.get("epoch", 0)
-            logger.info(f"Resuming from epoch {start_epoch}")
+            
+            # --- Integrity Check ---
+            saved_epoch = training_state.get("epoch")
+            if saved_epoch != last_epoch:
+                logger.error(f"Integrity Error: training_log says epoch {last_epoch}, but {training_state_path} says epoch {saved_epoch}.")
+                sys.exit(1)
+                
+            start_epoch = saved_epoch
+            logger.info(f"Resuming safely from epoch {start_epoch}")
         else:
-            logger.warning(f"No training_state.pt found in {latest_ckpt_path}, starting from epoch 0")
+            logger.error(f"Log indicates epoch {last_epoch} but no training_state.pt found in {latest_ckpt_path}. Cannot guarantee safe resume.")
+            sys.exit(1)
     
     logger.info("Loading model...")
     model = load_model(latest_ckpt_path)
@@ -180,6 +192,9 @@ def _run(args: argparse.Namespace) -> None:
     # Optimizer & Scheduler
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     if args.use_8bit_adam:
+        if not HAS_BNB:
+            logger.error("use_8bit_adam requested but bitsandbytes is not installed.")
+            sys.exit(1)
         logger.info("Using 8-bit AdamW optimizer.")
         optimizer = bnb.optim.AdamW8bit(trainable_params, lr=args.peak_lr)
     else:
