@@ -43,7 +43,7 @@ from tqdm import tqdm
 
 from mimir.config import load_config
 
-from mimir.features import BinderFeatures, parse_mmcif_bytes
+from mimir.features import BinderFeatures, parse_binder_mmcif_bytes
 
 # ---
 # Constants
@@ -121,7 +121,6 @@ def compute_features(
         entry_id=binder_id,
         sequence=sequence,
         structure_tokens=None,
-        sasa=None,
     )
 
     # Non-PDB entries (HH, VH) have no structure — return sequence only
@@ -146,10 +145,14 @@ def compute_features(
         if entry_type == "PDB" and "_" in binder_id:
             chain_id = binder_id.split("_")[-1]
 
-        # Parse mmCIF and extract 3-track features for the specific chain
-        parsed_structure = parse_mmcif_bytes(
-            structure_content, compressed=True, chain_id=chain_id
+        # Parse mmCIF and extract aligned features for the specific chain
+        parsed_structure = parse_binder_mmcif_bytes(
+            structure_content, reference_sequence=sequence, compressed=True, chain_id=chain_id
         )
+
+        if parsed_structure is None:
+            # Full void
+            return features.to_dict(), None
 
         # Tokenize structure coordinates into discrete ESM-3 tokens
         with torch.no_grad():
@@ -162,8 +165,7 @@ def compute_features(
             )
 
         features.sequence = parsed_structure.sequence
-        features.structure_tokens = struct_tokens.squeeze(0).tolist()
-        features.sasa = parsed_structure.sasa.tolist() if parsed_structure.sasa is not None else None
+        features.structure_tokens = struct_tokens.flatten().tolist()
 
     except Exception as e:
         # Degrade to sequence-only so the entry is never lost

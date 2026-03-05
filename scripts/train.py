@@ -283,12 +283,16 @@ def _run(args: argparse.Namespace) -> None:
             mask_seq = labels_seq != -100
             mask_struct = labels_struct != -100
             
+            # Exclude NaN targets (token 2246) from structure mask
+            mask_struct_valid = mask_struct & (labels_struct != 2246)
+            
             num_masked_seq = mask_seq.sum(dim=1).float()
-            num_masked_struct = mask_struct.sum(dim=1).float()
+            num_masked_struct = mask_struct_valid.sum(dim=1).float()
             total_masked = num_masked_seq + num_masked_struct
             
             sample_loss_seq = (loss_seq_per_token * mask_seq.float()).sum(dim=1)
-            sample_loss_struct = (loss_struct_per_token * mask_struct.float()).sum(dim=1)
+            # Use valid mask so NaN targets log 0 loss
+            sample_loss_struct = (loss_struct_per_token * mask_struct_valid.float()).sum(dim=1)
             
             # Unweighted loss per sample for tracking perplexity
             sample_loss = (sample_loss_seq + sample_loss_struct) / total_masked.clamp(min=1)
@@ -324,7 +328,7 @@ def _run(args: argparse.Namespace) -> None:
                 pred_struct = output.structure_logits.argmax(dim=-1)
                 
                 correct_seq = (pred_seq == labels_seq) & mask_seq
-                correct_struct = (pred_struct == labels_struct) & mask_struct
+                correct_struct = (pred_struct == labels_struct) & mask_struct_valid
                 
                 for i in range(labels_seq.size(0)):
                     nm_seq = num_masked_seq[i].item()

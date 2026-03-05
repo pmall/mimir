@@ -108,7 +108,7 @@ def compute_features(
         features = TargetFeatures(
             entry_id=entry_id,
             sequence=parsed_target.sequence,
-            structure_tokens=struct_tokens.squeeze(0).tolist(),
+            structure_tokens=struct_tokens.flatten().tolist(),
             sasa=parsed_target.sasa.tolist(),
             plddt=parsed_target.global_plddt,
             residue_plddt=parsed_target.residue_plddt.tolist(),

@@ -57,7 +57,7 @@ def _get_clean_atom_array(
     try:
         cif_file = pdbx.CIFFile.read(io.StringIO(cif_content))
         
-        fields = ["auth_asym_id"]
+        fields = ["auth_asym_id", "label_seq_id"]
         if extra_fields:
             fields.extend(extra_fields)
             
@@ -138,77 +138,77 @@ def _extract_3_tracks(structure: struc.AtomArray) -> tuple[str, np.ndarray, np.n
         sasa = sasa.numpy()
 
     return sequence, coords, sasa
+class ParsedBinderStructure:
+    """Standard parsed structure results for Binders (no SASA)."""
+    def __init__(self, sequence: str, coords: np.ndarray):
+        self.sequence = sequence
+        self.coords = coords
 
 
-def parse_mmcif(cif_content: str, chain_id: str | None = None) -> ParsedStructure:
-    """Parse mmCIF content and extract standard 3-track features.
+
+def parse_binder_mmcif(cif_content: str, reference_sequence: str, chain_id: str | None = None) -> ParsedBinderStructure | None:
+    """Parse mmCIF content for binders and align structure to a reference sequence.
 
     Args:
         cif_content: Raw mmCIF file content as string.
+        reference_sequence: Biological sequence of the binder (required for alignment).
         chain_id: Optional chain ID to filter by. If None, uses all chains.
 
     Returns:
-        A ParsedStructure object containing sequence, coordinates, and sasa.
+        A ParsedBinderStructure object containing the sequence and aligned coordinates,
+        or None if no structural atoms remain after filtering.
 
     Raises:
-        ValueError: If structure cannot be parsed or contains non-standard residues.
+        ValueError: If structure cannot be parsed.
     """
-    structure = _get_clean_atom_array(cif_content, chain_id)
-    sequence, coords, sasa = _extract_3_tracks(structure)
-    return ParsedStructure(sequence=sequence, coords=coords, sasa=sasa)
-
-
-def parse_af2_mmcif(cif_content: str, chain_id: str | None = None) -> ParsedTargetStructure:
-    """Parse an AlphaFold2 mmCIF file, extracting features, per-residue pLDDT, and global pLDDT.
-
-    Args:
-        cif_content: Raw mmCIF file content as a string.
-        chain_id: Optional chain ID to filter by.
-
-    Returns:
-        A ParsedTargetStructure containing sequence, coords, sasa, global plddt, and residue plddts.
-
-    Raises:
-        ValueError: If parsing fails or metrics are not found.
-    """
-    # 1. Regex fast search for global pLDDT
-    import re
-    match = re.search(r"_ma_qa_metric_global\.metric_value\s+([\d\.]+)", cif_content)
-    if not match:
-        raise ValueError("Could not find global pLDDT (_ma_qa_metric_global.metric_value) in AF2 mmCIF.")
-    
     try:
-        global_plddt = float(match.group(1))
-    except (ValueError, TypeError) as e:
-        raise ValueError(f"Failed to parse global pLDDT value: {e}") from e
+        structure = _get_clean_atom_array(cif_content, chain_id)
+    except ValueError as e:
+        if "no standard residues" in str(e).lower():
+            return None
+        raise e
 
-    # 2. Extract strictly B-factors alongside standard tracking
-    structure = _get_clean_atom_array(cif_content, chain_id, extra_fields=["b_factor"])
-    
-    # 3. Pull per-residue B-factor corresponding precisely to CA atoms
+    # We only take the coordinate extraction logic to map the structure correctly
+    chain_encoder = ProteinChain.from_atomarray(structure)
+    params = chain_encoder.to_structure_encoder_inputs()
+    coords = params[0]
+    if hasattr(coords, "numpy"):
+        coords = coords.numpy()
+    if coords.ndim == 4 and coords.shape[0] == 1:
+        coords = coords[0]  # Remove batch dim -> (L_resolved, 37, 3)
+        
+    # The atom array gives us the label_seq_id mapping
+    # Note: Biotite's from_atomarray uses contiguous indices internally for the returned shape,
+    # but we can query the original structure CA atoms to map biological indices.
     ca_atoms = structure[structure.atom_name == "CA"]
-    if not hasattr(ca_atoms, "b_factor"):
-        raise ValueError("Failed to retrieve b_factor column from AF2 structure.")
-    residue_plddt = ca_atoms.b_factor
     
-    # 4. Extract seq, coords, sasa natively
-    sequence, coords, sasa = _extract_3_tracks(structure)
+    if len(ca_atoms) != coords.shape[0]:
+        # Fallback if mapping diverges
+        raise ValueError("Mismatch between CA atoms and extracted coordinates.")
+
+    L = len(reference_sequence)
+    aligned_coords = np.full((L, 37, 3), np.nan, dtype=np.float32)
     
-    if len(sequence) != len(residue_plddt):
-        raise ValueError(
-            f"Extraction mismatch: {len(sequence)} amino acids but {len(residue_plddt)} CA B-factors."
-        )
+    # Place each resolved residue at its biological index 
+    # (label_seq_id is 1-indexed, biological index is 0-indexed)
+    valid_mapping = False
+    for i, seq_id in enumerate(ca_atoms.label_seq_id):
+        try:
+            bio_idx = int(seq_id) - 1
+        except ValueError:
+            continue
+            
+        if 0 <= bio_idx < L:
+            aligned_coords[bio_idx] = coords[i]
+            valid_mapping = True
+            
+    if not valid_mapping:
+         return None
 
-    return ParsedTargetStructure(
-        sequence=sequence,
-        coords=coords,
-        sasa=sasa,
-        global_plddt=global_plddt,
-        residue_plddt=residue_plddt,
-    )
+    return ParsedBinderStructure(sequence=reference_sequence, coords=aligned_coords)
 
 
-def parse_mmcif_bytes(cif_bytes: bytes, compressed: bool = False, chain_id: str | None = None) -> ParsedStructure:
+def parse_binder_mmcif_bytes(cif_bytes: bytes, reference_sequence: str, compressed: bool = False, chain_id: str | None = None) -> ParsedBinderStructure | None:
     try:
         if compressed:
             dctx = zstd.ZstdDecompressor()
@@ -216,7 +216,7 @@ def parse_mmcif_bytes(cif_bytes: bytes, compressed: bool = False, chain_id: str 
         else:
             cif_content = cif_bytes.decode("utf-8")
 
-        return parse_mmcif(cif_content, chain_id=chain_id)
+        return parse_binder_mmcif(cif_content, reference_sequence=reference_sequence, chain_id=chain_id)
     except Exception as e:
         raise ValueError(f"Failed to parse mmCIF bytes: {e}") from e
 
@@ -347,6 +347,13 @@ def get_fingerprint_mask(
         threshold += 0.01
 
 
+class ParsedBinderStructure:
+    """Standard parsed structure results for Binders (no SASA)."""
+    def __init__(self, sequence: str, coords: np.ndarray):
+        self.sequence = sequence
+        self.coords = coords
+
+
 class BinderFeatures:
     """Container for binder features with serialization support."""
 
@@ -355,19 +362,16 @@ class BinderFeatures:
         entry_id: str,
         sequence: str,
         structure_tokens: list[int] | None = None,
-        sasa: list[float] | None = None,
     ):
         self.entry_id = entry_id
         self.sequence = sequence
         self.structure_tokens = structure_tokens
-        self.sasa = sasa
 
     def to_dict(self) -> dict:
         return {
             "id": self.entry_id,
             "sequence": self.sequence,
             "structure_tokens": self.structure_tokens,
-            "sasa": self.sasa,
         }
 
     @classmethod
@@ -376,11 +380,10 @@ class BinderFeatures:
             entry_id=data["id"],
             sequence=data["sequence"],
             structure_tokens=data.get("structure_tokens"),
-            sasa=data.get("sasa"),
         )
 
     def has_structure(self) -> bool:
-        return self.structure_tokens is not None and self.sasa is not None
+        return self.structure_tokens is not None
 
 
 class TargetFeatures:
