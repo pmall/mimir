@@ -103,6 +103,111 @@ def apply_mlm_masking(batch: dict, tokenizer: Any) -> Tuple[dict, torch.Tensor, 
     }
     return masked_batch, labels_seq, labels_struct
 
+def compute_mlm_loss(
+    sequence_logits: torch.Tensor,
+    structure_logits: torch.Tensor,
+    labels_seq: torch.Tensor,
+    labels_struct: torch.Tensor,
+    tokenizer: Any,
+    lam: float,
+    gradient_accumulation_steps: int = 1
+) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float]]:
+    """
+    Computes the weighted Masked Language Modeling loss and granular metrics.
+    
+    Args:
+        sequence_logits: (B, L, V_seq)
+        structure_logits: (B, L, V_struct)
+        labels_seq: (B, L) with -100 for ignored tokens
+        labels_struct: (B, L) with -100 for ignored tokens and 2246 for NaN tokens
+        lam: lambda penalty weight for number of masked tokens
+        
+    Returns:
+        loss: the scalar loss for backpropagation (already divided by accumulation steps)
+        sample_loss: the unweighted per-sample loss tensor (B,) for perplexity tracking
+        metrics: dictionary of raw correct/total/loss sums for metric tracking
+    """
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
+    device = sequence_logits.device
+    
+    loss_seq_per_token = criterion(sequence_logits.float().view(-1, sequence_logits.size(-1)), labels_seq.view(-1))
+    loss_seq_per_token = loss_seq_per_token.view(labels_seq.size())
+    
+    loss_struct_per_token = criterion(structure_logits.float().view(-1, structure_logits.size(-1)), labels_struct.view(-1))
+    loss_struct_per_token = loss_struct_per_token.view(labels_struct.size())
+    
+    mask_seq = labels_seq != -100
+    mask_struct = labels_struct != -100
+    
+    # Exclude NaN targets from structure mask
+    mask_struct_valid = mask_struct & (labels_struct != tokenizer.struct_nan)
+    
+    num_masked_seq = mask_seq.sum(dim=1).float()
+    num_masked_struct = mask_struct_valid.sum(dim=1).float()
+    total_masked = num_masked_seq + num_masked_struct
+    
+    sample_loss_seq = (loss_seq_per_token * mask_seq.float()).sum(dim=1)
+    # Use valid mask so NaN targets log 0 loss
+    sample_loss_struct = (loss_struct_per_token * mask_struct_valid.float()).sum(dim=1)
+    
+    # Unweighted loss per sample for tracking perplexity
+    sample_loss = (sample_loss_seq + sample_loss_struct) / total_masked.clamp(min=1)
+    
+    # Apply log boost
+    weight = lam * torch.log(1 + total_masked)
+    boosted_loss = (sample_loss * weight)
+    
+    valid_samples = total_masked > 0
+    if valid_samples.any():
+        loss = boosted_loss[valid_samples].mean()
+    else:
+        loss = torch.tensor(0.0, device=device, requires_grad=True)
+        
+    loss = loss / gradient_accumulation_steps
+    
+    # Computations for detailed metrics
+    m = {
+        "overall_correct": 0, "overall_total": 0, "overall_loss": 0.0,
+        "full_seq_correct": 0, "full_seq_total": 0, "full_seq_loss": 0.0,
+        "full_struct_correct": 0, "full_struct_total": 0, "full_struct_loss": 0.0,
+        "partial_seq_correct": 0, "partial_seq_total": 0, "partial_seq_loss": 0.0
+    }
+    
+    with torch.no_grad():
+        pred_seq = sequence_logits.argmax(dim=-1)
+        pred_struct = structure_logits.argmax(dim=-1)
+        
+        correct_seq = (pred_seq == labels_seq) & mask_seq
+        correct_struct = (pred_struct == labels_struct) & mask_struct_valid
+        
+        for i in range(labels_seq.size(0)):
+            nm_seq = num_masked_seq[i].item()
+            nm_struct = num_masked_struct[i].item()
+            if nm_seq == 0 and nm_struct == 0:
+                continue
+                
+            seq_corr = correct_seq[i].sum().item()
+            struct_corr = correct_struct[i].sum().item()
+            
+            m["overall_correct"] += seq_corr + struct_corr
+            m["overall_total"] += nm_seq + nm_struct
+            m["overall_loss"] += sample_loss_seq[i].item() + sample_loss_struct[i].item()
+            
+            if nm_struct > 0:
+                m["full_seq_correct"] += seq_corr
+                m["full_seq_total"] += nm_seq
+                m["full_seq_loss"] += sample_loss_seq[i].item()
+                
+                m["full_struct_correct"] += struct_corr
+                m["full_struct_total"] += nm_struct
+                m["full_struct_loss"] += sample_loss_struct[i].item()
+            else:
+                m["partial_seq_correct"] += seq_corr
+                m["partial_seq_total"] += nm_seq
+                m["partial_seq_loss"] += sample_loss_seq[i].item()
+                
+    return loss, sample_loss, m
+
 # --- Main Training Logic ---
 
 def safe_div(a: float, b: float) -> float: 
@@ -147,6 +252,7 @@ def _run(args: argparse.Namespace) -> None:
     start_epoch = 0
     latest_ckpt_path = None
     training_state = None
+    best_overall_loss = float("inf")
     
     log_file = checkpoint_dir / "training_log.jsonl"
     
@@ -154,6 +260,12 @@ def _run(args: argparse.Namespace) -> None:
         with open(log_file, "r") as f:
             lines = f.readlines()
         if lines:
+            for line in lines[::-1]:
+                # Find best overall loss across all runs
+                log = json.loads(line)
+                if "overall_loss_raw" in log and log["overall_loss_raw"] < best_overall_loss:
+                    best_overall_loss = log["overall_loss_raw"]
+
             last_log = json.loads(lines[-1])
             last_epoch = last_log.get("epoch", 0)
             if last_epoch > 0:
@@ -219,7 +331,7 @@ def _run(args: argparse.Namespace) -> None:
             scheduler.load_state_dict(training_state["scheduler"])
         logger.info(f"Resumed optimizer and scheduler from epoch {start_epoch}")
     
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
+    # Loss Criterion is now inside compute_mlm_loss
     
     for epoch in range(start_epoch + 1, args.epochs + 1):
         sampler.set_epoch(epoch)
@@ -240,10 +352,9 @@ def _run(args: argparse.Namespace) -> None:
         # Metrics
         m = {
             "overall_correct": 0, "overall_total": 0, "overall_loss": 0.0,
-            "seq_correct": 0, "seq_total": 0, "seq_loss": 0.0,
-            "struct_correct": 0, "struct_total": 0, "struct_loss": 0.0,
-            "seq_only_correct": 0, "seq_only_total": 0, "seq_only_loss": 0.0,
-            "has_struct_seq_correct": 0, "has_struct_seq_total": 0, "has_struct_seq_loss": 0.0
+            "full_seq_correct": 0, "full_seq_total": 0, "full_seq_loss": 0.0,
+            "full_struct_correct": 0, "full_struct_total": 0, "full_struct_loss": 0.0,
+            "partial_seq_correct": 0, "partial_seq_total": 0, "partial_seq_loss": 0.0
         }
         
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
@@ -264,50 +375,32 @@ def _run(args: argparse.Namespace) -> None:
             labels_seq = labels_seq.to(device)
             labels_struct = labels_struct.to(device)
             
+            # ESM3 explicitly requires these specific keyword arguments.
+            # - sequence_tokens: the primary amino acid + special tokens track
+            # - structure_tokens: the discretised VQ-VAE structure tokens track
+            # - sasa_tokens: the discretised SASA tokens track
+            # - sequence_id: the positional encoding coordinate track (called sequence_id in ESM3)
+            # Note: ESM3 does not use a traditional `attention_mask` kwarg; it relies on padding tokens internally.
             model_kwargs = {
                 "sequence_tokens": tokens["sequence"],
                 "structure_tokens": tokens["structure"],
                 "sasa_tokens": tokens["sasa"],
-                "position_ids": tokens["position_ids"]
+                "sequence_id": tokens["position_ids"]
             }
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 output = model(**model_kwargs)
                 
-            loss_seq_per_token = criterion(output.sequence_logits.float().view(-1, output.sequence_logits.size(-1)), labels_seq.view(-1))
-            loss_seq_per_token = loss_seq_per_token.view(labels_seq.size())
-            
-            loss_struct_per_token = criterion(output.structure_logits.float().view(-1, output.structure_logits.size(-1)), labels_struct.view(-1))
-            loss_struct_per_token = loss_struct_per_token.view(labels_struct.size())
-            
-            mask_seq = labels_seq != -100
-            mask_struct = labels_struct != -100
-            
-            # Exclude NaN targets (token 2246) from structure mask
-            mask_struct_valid = mask_struct & (labels_struct != 2246)
-            
-            num_masked_seq = mask_seq.sum(dim=1).float()
-            num_masked_struct = mask_struct_valid.sum(dim=1).float()
-            total_masked = num_masked_seq + num_masked_struct
-            
-            sample_loss_seq = (loss_seq_per_token * mask_seq.float()).sum(dim=1)
-            # Use valid mask so NaN targets log 0 loss
-            sample_loss_struct = (loss_struct_per_token * mask_struct_valid.float()).sum(dim=1)
-            
-            # Unweighted loss per sample for tracking perplexity
-            sample_loss = (sample_loss_seq + sample_loss_struct) / total_masked.clamp(min=1)
-            
-            # Apply log boost
-            weight = args.lam * torch.log(1 + total_masked)
-            boosted_loss = (sample_loss * weight)
-            
-            valid_samples = total_masked > 0
-            if valid_samples.any():
-                loss = boosted_loss[valid_samples].mean()
-            else:
-                loss = torch.tensor(0.0, device=device, requires_grad=True)
+                loss, sample_loss, step_metrics = compute_mlm_loss(
+                    sequence_logits=output.sequence_logits,
+                    structure_logits=output.structure_logits,
+                    labels_seq=labels_seq,
+                    labels_struct=labels_struct,
+                    tokenizer=tokenizer,
+                    lam=args.lam,
+                    gradient_accumulation_steps=args.gradient_accumulation_steps
+                )
                 
-            loss = loss / args.gradient_accumulation_steps
             loss.backward()
             
             if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -318,43 +411,20 @@ def _run(args: argparse.Namespace) -> None:
                 
             # Log metrics
             total_loss += loss.item() * args.gradient_accumulation_steps
+            
+            mask_seq = labels_seq != -100
+            mask_struct = labels_struct != -100
+            mask_struct_valid = mask_struct & (labels_struct != tokenizer.struct_nan)
+            total_masked = mask_seq.sum(dim=1).float() + mask_struct_valid.sum(dim=1).float()
+            valid_samples = total_masked > 0
+            
             if valid_samples.any():
                 total_true_loss += sample_loss[valid_samples].mean().item()
             num_batches += 1
             
-            # Computations for detailed metrics
-            with torch.no_grad():
-                pred_seq = output.sequence_logits.argmax(dim=-1)
-                pred_struct = output.structure_logits.argmax(dim=-1)
-                
-                correct_seq = (pred_seq == labels_seq) & mask_seq
-                correct_struct = (pred_struct == labels_struct) & mask_struct_valid
-                
-                for i in range(labels_seq.size(0)):
-                    nm_seq = num_masked_seq[i].item()
-                    nm_struct = num_masked_struct[i].item()
-                    if nm_seq == 0 and nm_struct == 0:
-                        continue
-                        
-                    seq_corr = correct_seq[i].sum().item()
-                    struct_corr = correct_struct[i].sum().item()
-                    
-                    m["overall_correct"] += seq_corr + struct_corr
-                    m["overall_total"] += nm_seq + nm_struct
-                    m["overall_loss"] += sample_loss_seq[i].item() + sample_loss_struct[i].item()
-                    
-                    if nm_struct > 0:
-                        m["has_struct_seq_correct"] += seq_corr
-                        m["has_struct_seq_total"] += nm_seq
-                        m["has_struct_seq_loss"] += sample_loss_seq[i].item()
-                        
-                        m["struct_correct"] += struct_corr
-                        m["struct_total"] += nm_struct
-                        m["struct_loss"] += sample_loss_struct[i].item()
-                    else:
-                        m["seq_only_correct"] += seq_corr
-                        m["seq_only_total"] += nm_seq
-                        m["seq_only_loss"] += sample_loss_seq[i].item()
+            # Accumulate step metrics
+            for k in m:
+                m[k] += step_metrics[k]
 
             pbar.set_postfix({
                 "Loss": f"{loss.item() * args.gradient_accumulation_steps:.4f}"
@@ -362,23 +432,36 @@ def _run(args: argparse.Namespace) -> None:
             
         # Final metrics
         overall_acc = safe_div(m["overall_correct"], m["overall_total"])
-        overall_ppl = math.exp(safe_div(m["overall_loss"], m["overall_total"])) if m["overall_total"] > 0 else 0.0
+        overall_loss_raw = safe_div(m["overall_loss"], m["overall_total"])
+        overall_ppl = math.exp(overall_loss_raw) if m["overall_total"] > 0 else 0.0
         
-        seq_acc = safe_div(m["has_struct_seq_correct"], m["has_struct_seq_total"])
-        seq_ppl = math.exp(safe_div(m["has_struct_seq_loss"], m["has_struct_seq_total"])) if m["has_struct_seq_total"] > 0 else 0.0
+        full_seq_acc = safe_div(m["full_seq_correct"], m["full_seq_total"])
+        full_seq_loss_raw = safe_div(m["full_seq_loss"], m["full_seq_total"])
+        full_seq_ppl = math.exp(full_seq_loss_raw) if m["full_seq_total"] > 0 else 0.0
         
-        struct_acc = safe_div(m["struct_correct"], m["struct_total"])
-        struct_ppl = math.exp(safe_div(m["struct_loss"], m["struct_total"])) if m["struct_total"] > 0 else 0.0
+        full_struct_acc = safe_div(m["full_struct_correct"], m["full_struct_total"])
+        full_struct_loss_raw = safe_div(m["full_struct_loss"], m["full_struct_total"])
+        full_struct_ppl = math.exp(full_struct_loss_raw) if m["full_struct_total"] > 0 else 0.0
         
-        seq_only_acc = safe_div(m["seq_only_correct"], m["seq_only_total"])
-        seq_only_ppl = math.exp(safe_div(m["seq_only_loss"], m["seq_only_total"])) if m["seq_only_total"] > 0 else 0.0
+        # Add combined full accuracy and full perplexity
+        full_total_correct = m["full_seq_correct"] + m["full_struct_correct"]
+        full_total = m["full_seq_total"] + m["full_struct_total"]
+        full_total_loss = m["full_seq_loss"] + m["full_struct_loss"]
+        
+        full_acc = safe_div(full_total_correct, full_total)
+        full_loss_raw = safe_div(full_total_loss, full_total)
+        full_ppl = math.exp(full_loss_raw) if full_total > 0 else 0.0
+        
+        partial_seq_acc = safe_div(m["partial_seq_correct"], m["partial_seq_total"])
+        partial_seq_loss_raw = safe_div(m["partial_seq_loss"], m["partial_seq_total"])
+        partial_seq_ppl = math.exp(partial_seq_loss_raw) if m["partial_seq_total"] > 0 else 0.0
         
         avg_loss = safe_div(total_loss, num_batches)
         current_lr = scheduler.get_last_lr()[0]
         
         logger.info(
             f"Epoch {epoch:3d} | lr: {current_lr:.6f} | loss: {avg_loss:.3f} | acc: {overall_acc:.3f} | ppl: {overall_ppl:.2f} | "
-            f"seq_acc: {seq_acc:.3f} | struct_acc: {struct_acc:.3f} | seq_only_acc: {seq_only_acc:.3f} | skipped: {total_skipped}"
+            f"full_acc: {full_acc:.3f} | partial_acc: {partial_seq_acc:.3f} | skipped: {total_skipped}"
         )
         
         log_entry = {
@@ -387,14 +470,26 @@ def _run(args: argparse.Namespace) -> None:
             "lr": current_lr,
             "lambda": args.lam,
             "skipped_samples": total_skipped,
+            
             "overall_accuracy": overall_acc,
             "overall_perplexity": overall_ppl,
-            "seq_accuracy": seq_acc,
-            "seq_perplexity": seq_ppl,
-            "struct_accuracy": struct_acc,
-            "struct_perplexity": struct_ppl,
-            "seq_only_accuracy": seq_only_acc,
-            "seq_only_perplexity": seq_only_ppl
+            "overall_loss_raw": overall_loss_raw,
+            
+            "full_accuracy": full_acc,
+            "full_perplexity": full_ppl,
+            "full_loss_raw": full_loss_raw,
+            
+            "full_seq_accuracy": full_seq_acc,
+            "full_seq_perplexity": full_seq_ppl,
+            "full_seq_loss_raw": full_seq_loss_raw,
+            
+            "full_struct_accuracy": full_struct_acc,
+            "full_struct_perplexity": full_struct_ppl,
+            "full_struct_loss_raw": full_struct_loss_raw,
+            
+            "partial_seq_accuracy": partial_seq_acc,
+            "partial_seq_perplexity": partial_seq_ppl,
+            "partial_seq_loss_raw": partial_seq_loss_raw
         }
         with open(log_file, "a") as f:
             f.write(json.dumps(log_entry) + "\n")
@@ -422,6 +517,16 @@ def _run(args: argparse.Namespace) -> None:
             threading.Thread(target=torch.save, args=(training_state, save_path / "training_state.pt")).start()
             
             logger.info(f"Started async save for checkpoint to {save_path}")
+
+        if overall_loss_raw < best_overall_loss:
+            best_overall_loss = overall_loss_raw
+            logger.info(f"New best overall loss: {best_overall_loss:.4f}. Saving best model checkpoint.")
+            best_dir = checkpoint_dir / "best_model"
+            best_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Use sync save for the best model to avoid any race conditions on overwritten path
+            model.save_pretrained(best_dir)
+            torch.save(cut_embeddings, best_dir / "cut_embeddings.pt")
 
 
 # --- Main ---

@@ -149,3 +149,89 @@ def test_lr_schedule_warmup_and_decay():
     # Check that it decays to exactly 1e-5
     final_lr = scheduler.get_last_lr()[0]
     assert math.isclose(final_lr, 1e-5, rel_tol=1e-5)
+
+def test_compute_mlm_loss(tokenizer):
+    """Test: compute_mlm_loss correctly calculates weighted loss, NaN exclusions, and detailed metrics"""
+    from scripts.train import compute_mlm_loss
+    
+    B, L, V_seq, V_struct = 2, 4, 64, 4096
+    
+    # 1. Setup deterministic logits
+    # Make logit[true_label] very high so loss is ~0 for correct, and low for incorrect
+    seq_logits = torch.zeros(B, L, V_seq)
+    struct_logits = torch.zeros(B, L, V_struct)
+    
+    # 2. Setup labels
+    # Batch 0: 2 seq masked, 1 struct masked (full binder)
+    # Batch 1: 1 seq masked, 0 struct masked (partial binder)
+    labels_seq = torch.full((B, L), -100, dtype=torch.long)
+    labels_struct = torch.full((B, L), -100, dtype=torch.long)
+    
+    # Batch 0 valid labels
+    labels_seq[0, 1] = 10; seq_logits[0, 1, 10] = 100.0 # Correct prediction (~0 loss)
+    labels_seq[0, 2] = 20; seq_logits[0, 2, 5] = 100.0  # Incorrect prediction (high loss)
+    
+    labels_struct[0, 2] = 500; struct_logits[0, 2, 500] = 100.0 # Correct structure prediction
+    labels_struct[0, 3] = tokenizer.struct_nan  # NaN structure token (should be excluded)
+    
+    # Batch 1 valid labels (partial binder)
+    labels_seq[1, 1] = 30; seq_logits[1, 1, 30] = 100.0 # Correct prediction
+    
+    # Run the loss computation
+    lam = 0.5
+    loss, sample_loss, metrics = compute_mlm_loss(
+        sequence_logits=seq_logits,
+        structure_logits=struct_logits,
+        labels_seq=labels_seq,
+        labels_struct=labels_struct,
+        tokenizer=tokenizer,
+        lam=lam,
+        gradient_accumulation_steps=2
+    )
+    
+    # --- Verify Metric Accumulation ---
+    # Batch 0 (full binder): 2 seq tokens, 1 struct token = 3 tokens total
+    # 1 seq correct + 1 struct correct = 2 correct
+    assert metrics["full_seq_total"] == 2
+    assert metrics["full_seq_correct"] == 1
+    assert metrics["full_struct_total"] == 1
+    assert metrics["full_struct_correct"] == 1
+    
+    # Batch 1 (partial binder): 1 seq token, 0 struct tokens = 1 token total
+    # 1 seq correct = 1 correct
+    assert metrics["partial_seq_total"] == 1
+    assert metrics["partial_seq_correct"] == 1
+    assert metrics["partial_struct_total"] == 0 if "partial_struct_total" in metrics else True
+    
+    assert metrics["overall_total"] == 4
+    assert metrics["overall_correct"] == 3
+    
+    # --- Verify Math ---
+    # The NaN struct token MUST be excluded from totals and loss
+    mask_struct_valid = (labels_struct != -100) & (labels_struct != tokenizer.struct_nan)
+    assert mask_struct_valid[0, 3].item() is False
+    
+    # Expected unweighted sample_loss
+    # Batch 0: raw seq loss ~ (0 + 100) / 3 total tokens, struct loss ~ 0 / 3 total tokens
+    # CrossEntropy of a one-hot logit of 100 is ~0. CrossEntropy of a logit of 0 vs 100 is ~100.
+    loss_b0 = sample_loss[0].item()
+    assert abs(loss_b0 - (100.0 / 3.0)) < 1.0
+    
+    loss_b1 = sample_loss[1].item()
+    assert abs(loss_b1 - 0.0) < 1.0 # Perfect prediction on single token
+    
+    # Expected boosted loss calculation
+    # Weights: w_b0 = 0.5 * ln(1 + 3) = 0.5 * ln(4)
+    # Weights: w_b1 = 0.5 * ln(1 + 1) = 0.5 * ln(2)
+    expected_w0 = 0.5 * math.log(4)
+    expected_w1 = 0.5 * math.log(2)
+    
+    boosted_loss_0 = expected_w0 * sample_loss[0]
+    boosted_loss_1 = expected_w1 * sample_loss[1]
+    
+    expected_mean_loss = (boosted_loss_0 + boosted_loss_1) / 2.0
+    
+    # We passed gradient_accumulation_steps=2
+    expected_final_loss = expected_mean_loss / 2.0
+    
+    assert torch.allclose(loss, expected_final_loss, atol=1e-4)

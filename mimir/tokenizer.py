@@ -32,17 +32,18 @@ class MimirTokenizer:
         self.seq_pad = self.sequence.pad_token_id
         self.seq_mask = self.sequence.mask_token_id
         
-        self.struct_pad = getattr(self.structure, "pad_token_id", 4099)
-        self.struct_mask = getattr(self.structure, "mask_token_id", 4096)
-        self.struct_bos = getattr(self.structure, "bos_token_id", 4098)
-        self.struct_eos = getattr(self.structure, "eos_token_id", 4097)
+        self.struct_pad = self.structure.pad_token_id
+        self.struct_mask = self.structure.mask_token_id
+        self.struct_bos = self.structure.bos_token_id
+        self.struct_eos = self.structure.eos_token_id
+        self.struct_nan = 2246 # Explicitly defined NaN token for VQ-VAE structure space
         
         # Note: In ESM3, the SASA tokenizer doesn't have distinct special tokens.
         # pad, mask, bos, and eos all genuinely resolve to 0.
-        self.sasa_pad = getattr(self.sasa, "pad_token_id", 0)
-        self.sasa_mask = getattr(self.sasa, "mask_token_id", 0)
-        self.sasa_bos = getattr(self.sasa, "bos_token_id", 0)
-        self.sasa_eos = getattr(self.sasa, "eos_token_id", 0)
+        self.sasa_pad = self.sasa.pad_token_id
+        self.sasa_mask = self.sasa.mask_token_id
+        self.sasa_bos = self.sasa.bos_token_id
+        self.sasa_eos = self.sasa.eos_token_id
 
 
 

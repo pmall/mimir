@@ -99,6 +99,28 @@ def verify_dataloader(name: str, csv_path: Path, fp_lmdb: Path, binders_lmdb: Pa
             assert struct.dtype == torch.long
             assert seq.dtype == torch.long
             
+            # --- Advanced Format and Values Checks ---
+            
+            # 1. Monotonically increasing position IDs
+            # Wait, position IDs are padded with 0. 
+            # We must only check the sequence up to the valid length or use the attention mask.
+            for i in range(b):
+                valid_len = attn[i].sum().item()
+                if valid_len <= 1:
+                    continue
+                    
+                valid_positions = pos[i, :valid_len]
+                diffs = valid_positions[1:] - valid_positions[:-1]
+                assert torch.all(diffs > 0), f"Position IDs must be strictly monotonically increasing. Found backwards or repeating pos: {valid_positions}"
+                
+                # 2. Check +1000 gap at the cut.
+                # Cut token is tokenizer.cut_seq (64). Find its index.
+                cut_indices = (seq[i, :valid_len] == tokenizer.cut_seq).nonzero(as_tuple=True)[0]
+                if len(cut_indices) > 0:
+                    cut_idx = cut_indices[0].item()
+                    if cut_idx > 0:
+                        gap_at_cut = pos[i, cut_idx].item() - pos[i, cut_idx - 1].item()
+                        assert gap_at_cut == 1000, f"Expected gap of EXACTLY 1000 at the cut token, but found gap {gap_at_cut} at index {cut_idx} for sequence {i}. Previous pos: {pos[i, cut_idx-1]}, Cut pos: {pos[i, cut_idx]}"
     except Exception as e:
         import traceback
         traceback.print_exc()

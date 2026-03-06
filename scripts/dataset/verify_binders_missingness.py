@@ -6,6 +6,7 @@ from pathlib import Path
 import lmdb
 import msgpack
 from mimir.config import load_config
+from mimir.tokenizer import load_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ def main():
     )
     
     config = load_config(args.config)
+    tokenizer = load_tokenizer()
     
     if not config.features_binders.exists():
         logger.error(f"Features LMDB not found at {config.features_binders}")
@@ -46,7 +48,7 @@ def main():
                 
             total_structures += 1
             length = len(struct)
-            nan_count = struct.count(2246)
+            nan_count = struct.count(tokenizer.struct_nan)
             
             total_tokens += length
             total_nan_tokens += nan_count
