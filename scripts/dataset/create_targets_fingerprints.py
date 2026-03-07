@@ -5,7 +5,7 @@ Filters down positions from the target features based on pLDDT and relative SASA
 Maintains continuous synchronous tracks.
 
 Usage:
-    uv run python -m scripts.dataset.create_features_fingerprints \\
+    uv run python -m scripts.dataset.create_targets_fingerprints \\
         --config data/run78-v2/config.json \\
         [--max-len 280] [--limit N] [-v]
 """
@@ -56,7 +56,10 @@ def extract_fingerprint(
     tokens_np = np.array(target.structure_tokens)
     sasa_np = np.array(target.sasa)
     plddt_np = np.array(target.residue_plddt)
-    pos_np = np.array(target.position_ids)
+    coords_np = np.array(target.coordinates)
+    
+    # Generate 1-indexed position IDs
+    pos_np = np.arange(1, len(target.sequence) + 1, dtype=int)
 
     # 1. Get the shared centralized boolean mask and threshold
     mask_result = get_fingerprint_mask(
@@ -71,12 +74,13 @@ def extract_fingerprint(
     if mask is None:
         return None
     
-    # 2. Apply mask to all 5 synchronized tracks
+    # 2. Apply mask to all 6 synchronized tracks
     f_seq = seq_np[mask]
     f_tokens = tokens_np[mask]
     f_sasa = sasa_np[mask]
     f_plddt = plddt_np[mask]
     f_pos = pos_np[mask]
+    f_coords = coords_np[mask]
 
     fingerprint = FingerprintFeatures(
         entry_id=target.entry_id,
@@ -85,6 +89,7 @@ def extract_fingerprint(
         sasa=f_sasa.tolist(),
         residue_plddt=f_plddt.tolist(),
         position_ids=f_pos.tolist(),
+        coordinates=f_coords.tolist(),
         rsasa_threshold=threshold,
     )
 
@@ -137,7 +142,7 @@ def main() -> None:
         logger.error(f"Input LMDB not found: {config.features_targets}")
         sys.exit(1)
 
-    create_features_fingerprints(
+    create_targets_fingerprints(
         input_lmdb=config.features_targets,
         output_lmdb=config.features_fingerprints,
         max_len=args.max_len,
@@ -145,7 +150,7 @@ def main() -> None:
     )
 
 
-def create_features_fingerprints(
+def create_targets_fingerprints(
     input_lmdb: Path,
     output_lmdb: Path,
     max_len: int = 280,

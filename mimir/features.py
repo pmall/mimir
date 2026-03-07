@@ -130,7 +130,7 @@ def _extract_3_tracks(structure: struc.AtomArray) -> tuple[str, np.ndarray, np.n
     if hasattr(coords, "numpy"):
         coords = coords.numpy()
     if coords.ndim == 4 and coords.shape[0] == 1:
-        coords = coords[0]  # Remove batch dim
+        coords = coords[0, :, :3, :]  # Remove batch dim and keep only backbone N, CA, C
 
     # Extract SASA
     sasa = chain.sasa()
@@ -219,6 +219,42 @@ def parse_binder_mmcif_bytes(cif_bytes: bytes, reference_sequence: str, compress
         return parse_binder_mmcif(cif_content, reference_sequence=reference_sequence, chain_id=chain_id)
     except Exception as e:
         raise ValueError(f"Failed to parse mmCIF bytes: {e}") from e
+
+
+def parse_af2_mmcif(cif_content: str, chain_id: str | None = None) -> ParsedTargetStructure:
+    """Parse mmCIF content from AlphaFold2 and extract sequences, coords, SASA, and pLDDT.
+
+    Args:
+        cif_content: Raw mmCIF file content as string.
+        chain_id: Optional chain ID to filter by. If None, uses all chains.
+
+    Returns:
+        A ParsedTargetStructure object containing global and per-residue pLDDT,
+        or None if no structural atoms remain after filtering.
+
+    Raises:
+        ValueError: If structure cannot be parsed.
+    """
+    structure = _get_clean_atom_array(cif_content, chain_id, extra_fields=["B_iso_or_equiv"])
+    
+    sequence, coords, sasa = _extract_3_tracks(structure)
+
+    # Extract pLDDT from B-factor column of CA atoms
+    ca_atoms = structure[structure.atom_name == "CA"]
+    
+    if len(ca_atoms) != coords.shape[0]:
+        raise ValueError("Mismatch between CA atoms and extracted coordinates.")
+
+    residue_plddt = ca_atoms.B_iso_or_equiv.astype(np.float32)
+    global_plddt = float(np.mean(residue_plddt))
+
+    return ParsedTargetStructure(
+        sequence=sequence,
+        coords=coords,
+        sasa=sasa,
+        global_plddt=global_plddt,
+        residue_plddt=residue_plddt,
+    )
 
 
 def parse_af2_mmcif_bytes(
@@ -397,7 +433,7 @@ class TargetFeatures:
         sasa: list[float],
         plddt: float,
         residue_plddt: list[float],
-        position_ids: list[int],
+        coordinates: list[list[list[float]]],
     ):
         self.entry_id = entry_id
         self.sequence = sequence
@@ -405,7 +441,7 @@ class TargetFeatures:
         self.sasa = sasa
         self.plddt = plddt
         self.residue_plddt = residue_plddt
-        self.position_ids = position_ids
+        self.coordinates = coordinates
 
     def to_dict(self) -> dict:
         return {
@@ -415,7 +451,7 @@ class TargetFeatures:
             "sasa": self.sasa,
             "plddt": self.plddt,
             "residue_plddt": self.residue_plddt,
-            "position_ids": self.position_ids,
+            "coordinates": self.coordinates,
         }
 
     @classmethod
@@ -427,7 +463,7 @@ class TargetFeatures:
             sasa=data.get("sasa", []),
             plddt=data.get("plddt", 0.0),
             residue_plddt=data.get("residue_plddt", []),
-            position_ids=data.get("position_ids", []),
+            coordinates=data.get("coordinates", []),
         )
 
 
@@ -442,6 +478,7 @@ class FingerprintFeatures:
         sasa: list[float],
         residue_plddt: list[float],
         position_ids: list[int],
+        coordinates: list[list[list[float]]],
         rsasa_threshold: float | None = None,
     ):
         self.entry_id = entry_id
@@ -450,6 +487,7 @@ class FingerprintFeatures:
         self.sasa = sasa
         self.residue_plddt = residue_plddt
         self.position_ids = position_ids
+        self.coordinates = coordinates
         self.rsasa_threshold = rsasa_threshold
 
     def to_dict(self) -> dict:
@@ -460,6 +498,7 @@ class FingerprintFeatures:
             "sasa": self.sasa,
             "residue_plddt": self.residue_plddt,
             "position_ids": self.position_ids,
+            "coordinates": self.coordinates,
             "rsasa_threshold": self.rsasa_threshold,
         }
 
@@ -472,6 +511,7 @@ class FingerprintFeatures:
             sasa=data.get("sasa", []),
             residue_plddt=data.get("residue_plddt", []),
             position_ids=data.get("position_ids", []),
+            coordinates=data.get("coordinates", []),
             rsasa_threshold=data.get("rsasa_threshold"),
         )
 

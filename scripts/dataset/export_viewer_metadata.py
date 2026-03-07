@@ -137,7 +137,7 @@ def export_viewer_metadata(
                     row = {
                         "target_id": target.entry_id,
                         "sequence": target.sequence,
-                        "positions": json.dumps(target.position_ids),
+                        "positions": json.dumps(list(range(1, len(target.sequence) + 1))),
                         "mask": json.dumps(mask.tolist()),
                         "rsasa": json.dumps([round(x, 3) for x in rsasa.tolist()]),
                         "smoothed_rsasa": json.dumps([round(x, 3) for x in smoothed_rsasa.tolist()]),
@@ -211,12 +211,12 @@ def main() -> None:
 
     config = load_config(args.config)
 
-    if not config.features_fingerprints.exists():
-        logger.error(f"Input LMDB not found: {config.features_fingerprints}")
+    if not config.features_targets.exists():
+        logger.error(f"Input LMDB not found: {config.features_targets}")
         sys.exit(1)
 
     export_viewer_metadata(
-        input_lmdb=config.features_fingerprints,
+        input_lmdb=config.features_targets,
         output_csv=args.output,
         max_len=args.max_len,
         limit=args.limit,

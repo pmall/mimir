@@ -2,12 +2,12 @@
 Extract human protein target features from an AlphaFold2 bulk download tarball.
 
 Filters to retain only valid, single-fragment F1 UniProt sequences.
-Extracts the global pLDDT metric, standard sequence, structural tokens (3 tracks), and SASA.
+Extracts the global pLDDT metric, standard sequence, structural tokens (3 tracks), SASA, and 3D coordinates.
 Output is msgpack-serialized to an LMDB using the FingerprintFeatures schema.
 
 Usage:
-    uv run python -m scripts.dataset.extract_target_features \
-        --config data/run78-v2/config.json \\
+    uv run python -m scripts.dataset.extract_targets_features \
+        --config data/run78-v2/config.json \
         [--num-workers 4] [--chunk-size 500] [--limit N] [-v]
 """
 
@@ -112,7 +112,7 @@ def compute_features(
             sasa=parsed_target.sasa.tolist(),
             plddt=parsed_target.global_plddt,
             residue_plddt=parsed_target.residue_plddt.tolist(),
-            position_ids=list(range(1, len(parsed_target.sequence) + 1)),
+            coordinates=parsed_target.coords.tolist(),
         )
         
         return features.to_dict(), None
@@ -130,7 +130,7 @@ def compute_features(
 def main() -> None:
     """Parse CLI arguments and initiate target feature extraction."""
     parser = argparse.ArgumentParser(
-        description="Extract target features for ESM-3 from AF2 tarball"
+        description="Extract targets features for ESM-3 from AF2 tarball"
     )
     parser.add_argument(
         "--config",
@@ -176,7 +176,7 @@ def main() -> None:
         logger.error(f"Tar file not found: {config.af2_tar}")
         sys.exit(1)
 
-    extract_target_features(
+    extract_targets_features(
         tar_file=config.af2_tar,
         output=config.features_targets,
         num_workers=args.num_workers,
@@ -184,7 +184,7 @@ def main() -> None:
         limit=args.limit,
     )
 
-def extract_target_features(
+def extract_targets_features(
     tar_file: Path,
     output: Path,
     num_workers: int = 4,
