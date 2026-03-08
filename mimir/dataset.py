@@ -7,7 +7,7 @@ import csv
 import json
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Tuple, Optional
+from typing import Dict, Iterator, List, Optional
 import math
 import random
 
@@ -107,7 +107,7 @@ class MimirDataset(Dataset):
         fp_obj = msgpack.unpackb(fp_data, raw=False)
         bin_obj = msgpack.unpackb(bin_data, raw=False)
         
-        seq, struct, sasa, pos_ids, attn_mask = build_input_tensors(
+        seq, struct, sasa, attn_mask, chain_id, structure_coords = build_input_tensors(
             fingerprint=fp_obj,
             binder=bin_obj,
             tokenizer=self.tokenizer
@@ -117,8 +117,9 @@ class MimirDataset(Dataset):
             "sequence": seq,
             "structure": struct,
             "sasa": sasa,
-            "position_ids": pos_ids,
             "attention_mask": attn_mask,
+            "chain_id": chain_id,
+            "structure_coords": structure_coords,
             "length": len(seq)
         }
 
@@ -136,8 +137,9 @@ def mimir_collate_fn(batch: List[Optional[Dict[str, torch.Tensor]]], tokenizer: 
             "sequence": torch.empty((0, 0), dtype=torch.long),
             "structure": torch.empty((0, 0), dtype=torch.long),
             "sasa": torch.empty((0, 0), dtype=torch.long),
-            "position_ids": torch.empty((0, 0), dtype=torch.long),
             "attention_mask": torch.empty((0, 0), dtype=torch.long),
+            "chain_id": torch.empty((0, 0), dtype=torch.long),
+            "structure_coords": torch.empty((0, 0, 3, 3), dtype=torch.float32),
             "num_skipped": torch.tensor(num_skipped),
         }
         
@@ -150,25 +152,29 @@ def mimir_collate_fn(batch: List[Optional[Dict[str, torch.Tensor]]], tokenizer: 
     seq_padded = torch.full((batch_size, padded_len), tokenizer.seq_pad, dtype=torch.long)
     struct_padded = torch.full((batch_size, padded_len), tokenizer.struct_pad, dtype=torch.long)
     sasa_padded = torch.full((batch_size, padded_len), tokenizer.sasa_pad, dtype=torch.long)
-    # Position IDs can be padded with 0 since they are ignored by attention mask
-    pos_padded = torch.zeros((batch_size, padded_len), dtype=torch.long)
     # Attention mask padded with 0
     attn_padded = torch.zeros((batch_size, padded_len), dtype=torch.long)
+    # Chain ID: pad with 0 (undefined)
+    chain_id_padded = torch.zeros((batch_size, padded_len), dtype=torch.long)
+    # Structure coordinates: pad with NaN
+    coords_padded = torch.full((batch_size, padded_len, 3, 3), float('nan'), dtype=torch.float32)
     
     for i, item in enumerate(valid_batch):
-        l = item["length"]
-        seq_padded[i, :l] = item["sequence"]
-        struct_padded[i, :l] = item["structure"]
-        sasa_padded[i, :l] = item["sasa"]
-        pos_padded[i, :l] = item["position_ids"]
-        attn_padded[i, :l] = item["attention_mask"]
+        seq_len = item["length"]
+        seq_padded[i, :seq_len] = item["sequence"]
+        struct_padded[i, :seq_len] = item["structure"]
+        sasa_padded[i, :seq_len] = item["sasa"]
+        attn_padded[i, :seq_len] = item["attention_mask"]
+        chain_id_padded[i, :seq_len] = item["chain_id"]
+        coords_padded[i, :seq_len] = item["structure_coords"]
         
     return {
         "sequence": seq_padded,
         "structure": struct_padded,
         "sasa": sasa_padded,
-        "position_ids": pos_padded,
         "attention_mask": attn_padded,
+        "chain_id": chain_id_padded,
+        "structure_coords": coords_padded,
         "num_skipped": torch.tensor(num_skipped),
     }
 
@@ -229,8 +235,8 @@ class BucketBatchSampler(Sampler):
                 fp_obj = msgpack.unpackb(fp_data, raw=False)
                 bin_obj = msgpack.unpackb(bin_data, raw=False)
                 
-                # Total length = 1 (BOS) + FP length + 1 (CUT) + Binder length + 1 (EOS)
-                fp_len = len(fp_obj["position_ids"])
+                # Total length = 1 (BOS) + FP length + 1 (chainbreak) + Binder length + 1 (EOS)
+                fp_len = len(fp_obj["sequence"])
                 bin_len = len(bin_obj["sequence"])
                 total_len = 1 + fp_len + 1 + bin_len + 1
                 lengths.append(total_len)

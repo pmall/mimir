@@ -53,7 +53,7 @@ def apply_mlm_masking(batch: dict, tokenizer: Any) -> Tuple[dict, torch.Tensor, 
     labels_seq = torch.full_like(seq, -100)
     labels_struct = torch.full_like(struct, -100)
     
-    cut_token_id = tokenizer.cut_seq
+    cut_token_id = tokenizer.seq_chainbreak
     batch_size, seq_len = seq.shape
     
     for i in range(batch_size):
@@ -98,7 +98,8 @@ def apply_mlm_masking(batch: dict, tokenizer: Any) -> Tuple[dict, torch.Tensor, 
         "sequence": seq,
         "structure": struct,
         "sasa": batch["sasa"],
-        "position_ids": batch["position_ids"],
+        "chain_id": batch["chain_id"],
+        "structure_coords": batch["structure_coords"],
         "attention_mask": batch["attention_mask"]
     }
     return masked_batch, labels_seq, labels_struct
@@ -379,13 +380,14 @@ def _run(args: argparse.Namespace) -> None:
             # - sequence_tokens: the primary amino acid + special tokens track
             # - structure_tokens: the discretised VQ-VAE structure tokens track
             # - sasa_tokens: the discretised SASA tokens track
-            # - sequence_id: the positional encoding coordinate track (called sequence_id in ESM3)
-            # Note: ESM3 does not use a traditional `attention_mask` kwarg; it relies on padding tokens internally.
+            # - chain_id: the chain identifier for geometric attention
+            # - structure_coords: the 3D backbone coordinates (N, CA, C)
             model_kwargs = {
                 "sequence_tokens": tokens["sequence"],
                 "structure_tokens": tokens["structure"],
                 "sasa_tokens": tokens["sasa"],
-                "sequence_id": tokens["position_ids"]
+                "chain_id": tokens["chain_id"],
+                "structure_coords": tokens["structure_coords"],
             }
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
@@ -498,14 +500,6 @@ def _run(args: argparse.Namespace) -> None:
             save_path = checkpoint_dir / f"epoch_{epoch}"
             save_path.mkdir(parents=True, exist_ok=True)
             
-            cut_embedding_keys = [
-                "base_model.model.encoder.sequence_embed.cut_embedding.weight",
-                "base_model.model.encoder.structure_tokens_embed.cut_embedding.weight",
-                "base_model.model.encoder.sasa_embed.cut_embedding.weight",
-            ]
-            cut_embeddings = {k: model.state_dict()[k] for k in cut_embedding_keys}
-            torch.save(cut_embeddings, save_path / "cut_embeddings.pt")
-            
             training_state = {
                 "epoch": epoch,
                 "optimizer": optimizer.state_dict(),
@@ -526,7 +520,6 @@ def _run(args: argparse.Namespace) -> None:
             
             # Use sync save for the best model to avoid any race conditions on overwritten path
             model.save_pretrained(best_dir)
-            torch.save(cut_embeddings, best_dir / "cut_embeddings.pt")
 
 
 # --- Main ---

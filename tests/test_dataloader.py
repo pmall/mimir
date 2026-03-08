@@ -7,8 +7,6 @@ Run `scripts/extract_test_data.py` to regenerate the fixtures.
 from pathlib import Path
 
 import pytest
-import torch
-from torch.utils.data import DataLoader
 
 from mimir.tokenizer import load_tokenizer
 from mimir.dataset import MimirDataset, BucketBatchSampler, mimir_collate_fn

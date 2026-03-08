@@ -69,7 +69,8 @@ def verify_dataloader(name: str, csv_path: Path, fp_lmdb: Path, binders_lmdb: Pa
             seq = batch["sequence"]
             struct = batch["structure"]
             sasa = batch["sasa"]
-            pos = batch["position_ids"]
+            chain_id = batch["chain_id"]
+            coords = batch["structure_coords"]
             attn = batch["attention_mask"]
             skipped = int(batch["num_skipped"].item())
             
@@ -85,14 +86,16 @@ def verify_dataloader(name: str, csv_path: Path, fp_lmdb: Path, binders_lmdb: Pa
             assert seq.dim() == 2, f"Expected 2D Sequence Tensor, got {seq.dim()}"
             assert struct.dim() == 2, f"Expected 2D Structure Tensor, got {struct.dim()}"
             assert sasa.dim() == 2, f"Expected 2D SASA Tensor, got {sasa.dim()}"
-            assert pos.dim() == 2, f"Expected 2D Pos Tensor, got {pos.dim()}"
+            assert chain_id.dim() == 2, f"Expected 2D Chain ID Tensor, got {chain_id.dim()}"
+            assert coords.dim() == 4, f"Expected 4D Coords Tensor, got {coords.dim()}"
             assert attn.dim() == 2, f"Expected 2D Attn Tensor, got {attn.dim()}"
             
             # Shapes must match exactly.
             b, l = seq.shape
             assert struct.shape == (b, l), f"Shape mismatch Seq {seq.shape} vs Struct {struct.shape}"
             assert sasa.shape == (b, l), f"Shape mismatch Seq {seq.shape} vs SASA {sasa.shape}"
-            assert pos.shape == (b, l), f"Shape mismatch Seq {seq.shape} vs Pos {pos.shape}"
+            assert chain_id.shape == (b, l), f"Shape mismatch Seq {seq.shape} vs Chain ID {chain_id.shape}"
+            assert coords.shape == (b, l, 3, 3), f"Shape mismatch Seq {seq.shape} vs Coords {coords.shape}"
             assert attn.shape == (b, l), f"Shape mismatch Seq {seq.shape} vs Attn {attn.shape}"
             
             # Tokenizer dimension mappings must evaluate normally.
@@ -101,26 +104,30 @@ def verify_dataloader(name: str, csv_path: Path, fp_lmdb: Path, binders_lmdb: Pa
             
             # --- Advanced Format and Values Checks ---
             
-            # 1. Monotonically increasing position IDs
-            # Wait, position IDs are padded with 0. 
-            # We must only check the sequence up to the valid length or use the attention mask.
+            # 1. Chain ID: must be 1 for fingerprint+chainbreak, 2 for binder+EOS
             for i in range(b):
                 valid_len = attn[i].sum().item()
                 if valid_len <= 1:
                     continue
-                    
-                valid_positions = pos[i, :valid_len]
-                diffs = valid_positions[1:] - valid_positions[:-1]
-                assert torch.all(diffs > 0), f"Position IDs must be strictly monotonically increasing. Found backwards or repeating pos: {valid_positions}"
                 
-                # 2. Check +1000 gap at the cut.
-                # Cut token is tokenizer.cut_seq (64). Find its index.
-                cut_indices = (seq[i, :valid_len] == tokenizer.cut_seq).nonzero(as_tuple=True)[0]
-                if len(cut_indices) > 0:
-                    cut_idx = cut_indices[0].item()
-                    if cut_idx > 0:
-                        gap_at_cut = pos[i, cut_idx].item() - pos[i, cut_idx - 1].item()
-                        assert gap_at_cut == 1000, f"Expected gap of EXACTLY 1000 at the cut token, but found gap {gap_at_cut} at index {cut_idx} for sequence {i}. Previous pos: {pos[i, cut_idx-1]}, Cut pos: {pos[i, cut_idx]}"
+                valid_chain_ids = chain_id[i, :valid_len]
+                
+                # Find chainbreak position (transition from 1 to 2)
+                chainbreak_indices = (valid_chain_ids[1:] == 2) & (valid_chain_ids[:-1] == 1)
+                if chainbreak_indices.any():
+                    # There should be exactly one chainbreak
+                    assert chainbreak_indices.sum() == 1, f"Expected exactly one chainbreak, found {chainbreak_indices.sum()}"
+                
+                # 2. Chainbreak token present at chain transition
+                # Chainbreak token is tokenizer.seq_chainbreak (31). Find its index.
+                chainbreak_token_indices = (seq[i, :valid_len] == tokenizer.seq_chainbreak).nonzero(as_tuple=True)[0]
+                if len(chainbreak_token_indices) > 0:
+                    cb_idx = chainbreak_token_indices[0].item()
+                    # Chain ID at chainbreak position should be 1 (fingerprint side)
+                    assert chain_id[i, cb_idx] == 1, f"Chainbreak token should be at chain_id=1 position, got {chain_id[i, cb_idx]}"
+                    # Next position should be chain 2 (binder)
+                    if cb_idx + 1 < valid_len:
+                        assert chain_id[i, cb_idx + 1] == 2, f"Position after chainbreak should be chain 2, got {chain_id[i, cb_idx + 1]}"
     except Exception as e:
         import traceback
         traceback.print_exc()
