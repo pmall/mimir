@@ -227,12 +227,15 @@ def _run(args: argparse.Namespace) -> None:
     # Set seed early
     set_seed(args.seed)
     
-    # Enable TF32 for matrix multiplications and convolutions
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
+
+    # Explicitly enable Flash Attention 2 / SDPA
+    if torch.cuda.is_available():
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        logger.info("Flash Attention 2 / SDPA prioritized.")
     
     logger.info("Loading tokenizer and configuring dataloader...")
     tokenizer = load_tokenizer()
@@ -505,9 +508,6 @@ def _run(args: argparse.Namespace) -> None:
             "partial_seq_perplexity": partial_seq_ppl,
             "partial_seq_loss_raw": partial_seq_loss_raw
         }
-        with open(log_file, "a") as f:
-            f.write(json.dumps(log_entry) + "\n")
-            
         if epoch % args.checkpoint_every == 0:
             save_path = checkpoint_dir / f"epoch_{epoch}"
             save_path.mkdir(parents=True, exist_ok=True)
@@ -522,6 +522,10 @@ def _run(args: argparse.Namespace) -> None:
             torch.save(training_state, save_path / "training_state.pt")
             
             logger.info(f"Saved checkpoint to {save_path}")
+
+        # Log after checkpointing (crash safety)
+        with open(log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
 
         if overall_loss_raw < best_overall_loss:
             best_overall_loss = overall_loss_raw
@@ -539,14 +543,14 @@ def main():
     parser = argparse.ArgumentParser(description="Train Mimir v2 task 2")
     parser.add_argument("--config", type=Path, required=True, help="Path to config.json")
     parser.add_argument("--checkpoint-dir", type=str, required=True)
-    parser.add_argument("--epochs", type=int, default=100, help="Total number of epochs to train (default: 100)")
-    parser.add_argument("--batch-size", type=int, default=4, help="Batch size per worker/device (default: 4)")
+    parser.add_argument("--epochs", type=int, required=True, help="Total number of epochs to train")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size per worker/device (default: 32)")
     parser.add_argument("--peak-lr", type=float, default=1e-4, help="Peak learning rate after warmup (default: 1e-4)")
-    parser.add_argument("--lam", type=float, default=0.5, help="Lambda penalty for masks (default: 0.5)")
+    parser.add_argument("--lam", type=float, default=1.0, help="Lambda penalty for masks (default: 1.0)")
     parser.add_argument("--checkpoint-every", type=int, default=1, help="Save a checkpoint every N epochs (default: 1)")
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=1, help="Number of gradient accumulation steps (default: 1)")
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=4, help="Number of gradient accumulation steps (default: 4)")
     parser.add_argument("--use-8bit-adam", action="store_true", help="Use 8-bit AdamW optimizer if available (default: False)")
-    parser.add_argument("--num-workers", type=int, default=2, help="Number of dataloader workers (default: 2)")
+    parser.add_argument("--num-workers", type=int, default=4, help="Number of dataloader workers (default: 4)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility (default: 42)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging (default: False)")
     args = parser.parse_args()
