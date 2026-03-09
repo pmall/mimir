@@ -90,7 +90,7 @@ def compute_features(
         If features_dict is None, parsing failed entirely.
     """
     try:
-        parsed_target = parse_af2_mmcif_bytes(cif_bytes, compressed=False)
+        parsed_target = parse_af2_mmcif_bytes(cif_bytes, compressed=False, chain_id=None)
         
         # Tokenize structure coordinates into discrete ESM-3 tokens
         assert _STRUCTURE_ENCODER is not None

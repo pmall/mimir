@@ -44,8 +44,8 @@ class ParsedTargetStructure(ParsedStructure):
 
 def _get_clean_atom_array(
     cif_content: str,
-    chain_id: str | None = None,
-    extra_fields: list[str] | None = None
+    chain_id: str | None,
+    extra_fields: list[str] | None
 ) -> bs.AtomArray if 'bs' in globals() else struc.AtomArray:
     """Parse mmCIF and return a clean Biotite AtomArray filtered for standard amino acids.
 
@@ -148,7 +148,7 @@ class ParsedBinderStructure:
 
 
 
-def parse_binder_mmcif(cif_content: str, reference_sequence: str, chain_id: str | None = None) -> ParsedBinderStructure | None:
+def parse_binder_mmcif(cif_content: str, reference_sequence: str, chain_id: str | None) -> ParsedBinderStructure | None:
     """Parse mmCIF content for binders and align structure to a reference sequence.
 
     Args:
@@ -210,7 +210,7 @@ def parse_binder_mmcif(cif_content: str, reference_sequence: str, chain_id: str 
     return ParsedBinderStructure(sequence=reference_sequence, coords=aligned_coords)
 
 
-def parse_binder_mmcif_bytes(cif_bytes: bytes, reference_sequence: str, compressed: bool = False, chain_id: str | None = None) -> ParsedBinderStructure | None:
+def parse_binder_mmcif_bytes(cif_bytes: bytes, reference_sequence: str, compressed: bool, chain_id: str | None) -> ParsedBinderStructure | None:
     try:
         if compressed:
             dctx = zstd.ZstdDecompressor()
@@ -223,7 +223,7 @@ def parse_binder_mmcif_bytes(cif_bytes: bytes, reference_sequence: str, compress
         raise ValueError(f"Failed to parse mmCIF bytes: {e}") from e
 
 
-def parse_af2_mmcif(cif_content: str, chain_id: str | None = None) -> ParsedTargetStructure:
+def parse_af2_mmcif(cif_content: str, chain_id: str | None) -> ParsedTargetStructure:
     """Parse mmCIF content from AlphaFold2 and extract sequences, coords, SASA, and pLDDT.
 
     Args:
@@ -260,7 +260,7 @@ def parse_af2_mmcif(cif_content: str, chain_id: str | None = None) -> ParsedTarg
 
 
 def parse_af2_mmcif_bytes(
-    cif_bytes: bytes, compressed: bool = False, chain_id: str | None = None
+    cif_bytes: bytes, compressed: bool, chain_id: str | None
 ) -> ParsedTargetStructure:
     try:
         if compressed:
@@ -274,7 +274,7 @@ def parse_af2_mmcif_bytes(
         raise ValueError(f"Failed to parse AF2 mmCIF bytes: {e}") from e
 
 
-def parse_mmcif_file(file_path: Path, compressed: bool = False, chain_id: str | None = None) -> ParsedStructure:
+def parse_mmcif_file(file_path: Path, compressed: bool, chain_id: str | None) -> ParsedStructure:
     if not file_path.exists():
         raise FileNotFoundError(f"mmCIF file not found: {file_path}")
 
@@ -342,7 +342,7 @@ def get_fingerprint_mask(
     sequence: str,
     sasa: list[float] | np.ndarray,
     plddt: list[float] | np.ndarray,
-    max_len: int = 157,
+    max_len: int,
 ) -> tuple[np.ndarray | None, float | None]:
     """Returns a boolean mask of the kept positions and the applied rSASA threshold.
     

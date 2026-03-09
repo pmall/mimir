@@ -84,12 +84,10 @@ def apply_mlm_masking(batch: dict, tokenizer: Any) -> Tuple[dict, torch.Tensor, 
         if binder_len <= 0:
             continue
             
-        # Sample masking rate [0.25, 0.75]
-        mask_rate = random.uniform(0.25, 0.75)
-        num_mask = max(1, int(round(binder_len * mask_rate)))
-        
         # 1. Mask Sequence
-        mask_indices_seq = random.sample(range(binder_start, binder_end), num_mask)
+        mask_rate_seq = random.uniform(0.25, 0.75)
+        num_mask_seq = max(1, int(round(binder_len * mask_rate_seq)))
+        mask_indices_seq = random.sample(range(binder_start, binder_end), num_mask_seq)
         for idx in mask_indices_seq:
             labels_seq[i, idx] = seq[i, idx].item()
             seq[i, idx] = tokenizer.seq_mask
@@ -98,7 +96,9 @@ def apply_mlm_masking(batch: dict, tokenizer: Any) -> Tuple[dict, torch.Tensor, 
         # Check if structure is present (not all mask tokens)
         struct_binder = struct[i, binder_start:binder_end]
         if not torch.all(struct_binder == tokenizer.struct_mask):
-            mask_indices_struct = random.sample(range(binder_start, binder_end), num_mask)
+            mask_rate_struct = random.uniform(0.25, 0.75)
+            num_mask_struct = max(1, int(round(binder_len * mask_rate_struct)))
+            mask_indices_struct = random.sample(range(binder_start, binder_end), num_mask_struct)
             for idx in mask_indices_struct:
                 labels_struct[i, idx] = struct[i, idx].item()
                 struct[i, idx] = tokenizer.struct_mask
@@ -163,8 +163,8 @@ def compute_mlm_loss(
     # Unweighted loss per sample for tracking perplexity
     sample_loss = (sample_loss_seq + sample_loss_struct) / total_masked.clamp(min=1)
     
-    # Apply log boost
-    weight = lam * torch.log(1 + total_masked)
+    # Apply log boost: 1.0 + lam * log(1 + total_masked)
+    weight = 1.0 + lam * torch.log(1 + total_masked)
     boosted_loss = (sample_loss * weight)
     
     valid_samples = total_masked > 0

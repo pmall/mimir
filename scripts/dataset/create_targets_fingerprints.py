@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 def extract_fingerprint(
     target: TargetFeatures,
-    max_len: int = 280,
+    max_len: int,
 ) -> FingerprintFeatures | None:
     """Extract a synchronized sub-sequence fingerprint matching masking rules.
 
@@ -153,7 +153,7 @@ def main() -> None:
 def create_targets_fingerprints(
     input_lmdb: Path,
     output_lmdb: Path,
-    max_len: int = 280,
+    max_len: int,
     limit: int | None = None,
 ) -> None:
     """Process targets into fingerprints.
