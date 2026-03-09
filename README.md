@@ -12,7 +12,7 @@ However, evolution has only explored a tiny fraction of possible sequence space.
 
 ## Core Architecture: MÍMIR v2
 
-MÍMIR v2 represents a structural leap in generative binder design. Rather than treating target proteins as simple textual identifiers or linear 1D sequences, MÍMIR explicitly models the physical, 3D interface where binding occurs.
+MÍMIR v2 represents a structural leap in generative binder design. Rather than treating target proteins as simple textual identifiers or linear 1D sequences, MÍMIR explicitly models the physical, 3D interface where binding occurs. For a detailed explanation, refer to the [MÍMIR v2 Design Document](docs/mimir_v2_design.pdf).
 
 ### 1. The Structural Fingerprint
 
@@ -21,7 +21,7 @@ Proteins often contain hundreds or thousands of amino acids, but binding is medi
 - **Rigidity Gate:** Discards disordered loops or highly flexible regions that do not provide a stable docking surface for a peptide.
 - **Surface Gate:** Iteratively trims buried, inaccessible residues while strictly preserving concave cavities and binding pockets—the typical anchor points for high-affinity interactions.
 
-The model is conditioned explicitly on this structural surface, preserving the actual spatial relationships and distances between the critical residues.
+The model is conditioned explicitly on this structural surface, preserving the actual spatial relationships and distances between the critical residues. Visualization of these structural fingerprints can be explored at [mimir-viewer.vercel.app](https://mimir-viewer.vercel.app/).
 
 ### 2. Generalization by Structural Similarity
 
@@ -45,5 +45,6 @@ Because MÍMIR learns the direct relationship between target geometry and binder
 ## Technical Setup
 
 - **Foundation Engine:** ESM3 1.4B, fine-tuned efficiently via LoRA to handle massive vocabulary constraints.
-- **Spatial Anchoring:** Target interactions are separated via a custom positional encoding strategy (`<cut>` token boundaries and absolute RoPE position ID jumps). This explicitly informs the model it is processing two disjoint molecules interacting in physical space, without requiring foundational architectural modifications.
+- **Spatial Representation:** Target fingerprints are modeled using **3D backbone coordinates**, allowing the engine to process their actual spatial layout via native geometric attention.
+- **Chain Separation:** The fingerprint and the binder are explicitly distinguished using the **chain ID track** and native **chainbreak tokens**, informing the model of the disjoint nature of the two molecules.
 - **Generation Strategy:** Generates novel peptide sequences via Parallel Iterative Decoding through a Masked Language Modeling objective, gradually "sculpting" structurally valid sequences out of pure noise, conditioned entirely on the target's physical surface.
