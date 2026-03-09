@@ -1,5 +1,5 @@
 """
-Extract raw structure features (Sequence, Coordinates, SASA) for ESM-3.
+Extract raw structure features (Sequence, Coordinates) for ESM-3.
 
 Reads a binder list CSV, looks up structures in an LMDB, and computes features
 using ESM-3's ProteinChain.
@@ -12,7 +12,6 @@ Output LMDB entry schema (msgpack-serialized dict):
         "id":               str,        # binder_id from CSV
         "sequence":         str,        # amino-acid sequence (1-letter codes, length L)
         "structure_tokens": list[int],  # ESM-3 structure integer tokens (1D list), or None
-        "sasa":             list[float],# per-residue raw SASA in Å², length L, or None
     }
 
 Usage:
@@ -103,7 +102,7 @@ def compute_features(
 ) -> tuple[dict[str, Any], str | None]:
     """Compute structure features for a single entry.
 
-    For PDB entries, extracts structure tokens and SASA from the mmCIF.
+    For PDB entries, extracts structure tokens from the mmCIF.
     For non-PDB entries (HH, VH), returns only the sequence with None for
     structural features.
 

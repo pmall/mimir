@@ -138,6 +138,8 @@ def _extract_3_tracks(structure: struc.AtomArray) -> tuple[str, np.ndarray, np.n
         sasa = sasa.numpy()
 
     return sequence, coords, sasa
+
+
 class ParsedBinderStructure:
     """Standard parsed structure results for Binders (no SASA)."""
     def __init__(self, sequence: str, coords: np.ndarray):
@@ -383,11 +385,6 @@ def get_fingerprint_mask(
         threshold += 0.01
 
 
-class ParsedBinderStructure:
-    """Standard parsed structure results for Binders (no SASA)."""
-    def __init__(self, sequence: str, coords: np.ndarray):
-        self.sequence = sequence
-        self.coords = coords
 
 
 class BinderFeatures:

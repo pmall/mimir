@@ -38,6 +38,15 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("lmdb").setLevel(logging.WARNING)
 
+def set_seed(seed: int):
+    """Set global seeds for reproducibility."""
+    random.seed(seed)
+    # np.random.seed(seed)  # If numpy is added later
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # Ensure dataloader/sampler use this seed if needed
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
 # --- Masking Strategy ---
 
 def apply_mlm_masking(batch: dict, tokenizer: Any) -> Tuple[dict, torch.Tensor, torch.Tensor]:
@@ -215,6 +224,9 @@ def safe_div(a: float, b: float) -> float:
     return a / b if b > 0 else 0.0
 
 def _run(args: argparse.Namespace) -> None:
+    # Set seed early
+    set_seed(args.seed)
+    
     # Enable TF32 for matrix multiplications and convolutions
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -506,11 +518,10 @@ def _run(args: argparse.Namespace) -> None:
                 "scheduler": scheduler.state_dict()
             }
             
-            threading.Thread(target=model.save_pretrained, args=(save_path,)).start()
+            model.save_pretrained(save_path)
+            torch.save(training_state, save_path / "training_state.pt")
             
-            threading.Thread(target=torch.save, args=(training_state, save_path / "training_state.pt")).start()
-            
-            logger.info(f"Started async save for checkpoint to {save_path}")
+            logger.info(f"Saved checkpoint to {save_path}")
 
         if overall_loss_raw < best_overall_loss:
             best_overall_loss = overall_loss_raw
@@ -536,6 +547,7 @@ def main():
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1, help="Number of gradient accumulation steps (default: 1)")
     parser.add_argument("--use-8bit-adam", action="store_true", help="Use 8-bit AdamW optimizer if available (default: False)")
     parser.add_argument("--num-workers", type=int, default=2, help="Number of dataloader workers (default: 2)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility (default: 42)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging (default: False)")
     args = parser.parse_args()
     
