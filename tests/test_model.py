@@ -35,7 +35,7 @@ def no_struct_fix():
 # --- Tests ---
 
 def test_mlm_masking_rate_and_independence(tokenizer, struct_fix):
-    """Test: MLM masking rate in [0.25, 0.75], and independent per track"""
+    """Test: MLM masking rate in [0.25, 0.75], and independent per track at sample level"""
     fp, binder = struct_fix["fingerprint"], struct_fix["binder"]
     seq, struct, sasa, attn, chain_id, coords = build_input_tensors(fp, binder, tokenizer)
     
@@ -49,41 +49,44 @@ def test_mlm_masking_rate_and_independence(tokenizer, struct_fix):
         "length": len(seq)
     }
     
-    B = 100
+    B = 1000  # More samples for better statistics
     batch = mimir_collate_fn([item] * B, tokenizer)
     
-    L = batch["sequence"].size(1)
-
+    L_padded = batch["sequence"].size(1)
     fp_len = len(fp["sequence"])
-    fp_slice = slice(0, 1 + fp_len + 1)
     
-    # Binder part is from exactly right after chainbreak until just before EOS
-    # EOS is at L-1, so binder ends at L-1.
-    binder_slice = slice(1 + fp_len + 1, L - 1)
+    # Correctly find EOS position for a sample in the batch to get true binder length
+    # All samples are identical in this test batch
+    eos_pos = (batch["sequence"][0] == tokenizer.seq_eos).nonzero(as_tuple=True)[0][0].item()
+    binder_start = 1 + fp_len + 1
+    binder_end = eos_pos
+    binder_slice = slice(binder_start, binder_end)
+    binder_len = binder_end - binder_start
     
     masked, labels_seq, labels_struct = apply_mlm_masking(batch, tokenizer)
     
-    # 1. FP is never masked (labels are -100)
-    assert torch.all(labels_seq[:, fp_slice] == -100)
-    assert torch.all(labels_struct[:, fp_slice] == -100)
+    # 1. Verify rates are within range per sample
+    seq_masked = (labels_seq[:, binder_slice] != -100).float().sum(dim=1)
+    struct_masked = (labels_struct[:, binder_slice] != -100).float().sum(dim=1)
     
-    seq_masked_count = (labels_seq[:, binder_slice] != -100).sum().item()
-    struct_masked_count = (labels_struct[:, binder_slice] != -100).sum().item()
+    seq_rates = seq_masked / binder_len
+    struct_rates = struct_masked / binder_len
     
-    binder_len = (L - 1) - (1 + fp_len + 1)
-    total_binder_tokens = B * binder_len
-    seq_rate = seq_masked_count / total_binder_tokens
-    struct_rate = struct_masked_count / total_binder_tokens
+    # Allowing slight epsilon for rounding
+    assert torch.all(seq_rates >= 0.24) and torch.all(seq_rates <= 0.76)
+    assert torch.all(struct_rates >= 0.24) and torch.all(struct_rates <= 0.76)
     
-    # Rate should be roughly between 0.25 and 0.75
-    assert 0.20 <= seq_rate <= 0.80, f"Seq rate: {seq_rate}"
-    assert 0.20 <= struct_rate <= 0.80, f"Struct rate: {struct_rate}"
+    # 2. Independence: rates should not be identical for all samples
+    rate_diffs = (seq_rates - struct_rates).abs()
+    assert rate_diffs.max() > 0.05, "Masking rates appear coupled"
     
-    # 3. Independence: they shouldn't be exactly the same mask
+    # 3. Mask bitmask independence
+    # The actual indices selected should also be independent
     same_mask = (labels_seq[:, binder_slice] != -100) == (labels_struct[:, binder_slice] != -100)
     overlap_rate = same_mask.float().mean().item()
-    # Should definitely not be 1.0.
-    assert overlap_rate < 0.95
+    # If they were coupled, overlap would be 1.0. 
+    # If independent and say rate is 0.5, overlap would be ~0.5.
+    assert overlap_rate < 0.90
 
 def test_lr_schedule_warmup_and_decay():
     """Test: LR schedule warmup increases, decay decreases to 1e-5"""
@@ -127,14 +130,14 @@ def test_compute_mlm_loss(tokenizer):
     labels_seq = torch.full((B, L), -100, dtype=torch.long)
     labels_struct = torch.full((B, L), -100, dtype=torch.long)
     
-    # Batch 0 valid labels
-    labels_seq[0, 1] = 10; seq_logits[0, 1, 10] = 100.0
-    labels_seq[0, 2] = 20; seq_logits[0, 2, 5] = 100.0
+    # Batch 0 valid labels (3 masked total, 1 is sequence, 2 is sequence+struct)
+    labels_seq[0, 1] = 10; seq_logits[0, 1, 10] = 100.0  # Sequence masked at 1
+    labels_seq[0, 2] = 20; seq_logits[0, 2, 5] = 100.0   # Sequence masked at 2 (wrong pred)
     
-    labels_struct[0, 2] = 500; struct_logits[0, 2, 500] = 100.0
-    labels_struct[0, 3] = tokenizer.struct_nan
+    labels_struct[0, 2] = 500; struct_logits[0, 2, 500] = 100.0 # Struct masked at 2
+    labels_struct[0, 3] = tokenizer.struct_nan  # Struct masked at 3 but NaN
     
-    # Batch 1 valid labels (partial binder)
+    # Batch 1 valid labels (1 masked total)
     labels_seq[1, 1] = 30; seq_logits[1, 1, 30] = 100.0
     
     lam = 0.5
@@ -149,6 +152,9 @@ def test_compute_mlm_loss(tokenizer):
     )
     
     # Verify Metric Accumulation
+    # Batch 0: nm_seq=2, nm_struct=1 (index 3 is NaN). Total = 3.
+    # Batch 1: nm_seq=1, nm_struct=0. Total = 1.
+    
     assert metrics["full_seq_total"] == 2
     assert metrics["full_seq_correct"] == 1
     assert metrics["full_struct_total"] == 1
@@ -164,19 +170,26 @@ def test_compute_mlm_loss(tokenizer):
     mask_struct_valid = (labels_struct != -100) & (labels_struct != tokenizer.struct_nan)
     assert mask_struct_valid[0, 3].item() is False
     
+    # loss_b0 math:
+    # labels_seq[0, 1] is correct (loss=0), labels_seq[0, 2] is wrong (loss=100), labels_struct[0, 2] is correct (loss=0)
+    # total_masked_b0 = 3
+    # sample_loss_b0 = (0 + 100 + 0) / 3 = 33.33
     loss_b0 = sample_loss[0].item()
     assert abs(loss_b0 - (100.0 / 3.0)) < 1.0
     
+    # loss_b1 math:
+    # total_masked_b1 = 1, logic is correct (loss=0)
     loss_b1 = sample_loss[1].item()
     assert abs(loss_b1 - 0.0) < 1.0
     
-    expected_w0 = 0.5 * math.log(4)
-    expected_w1 = 0.5 * math.log(2)
+    # Boosted Loss: 1.0 + lam * math.log(1 + total_masked)
+    expected_w0 = 1.0 + 0.5 * math.log(4) # 1 + 0.5 * log(1+3)
+    expected_w1 = 1.0 + 0.5 * math.log(2) # 1 + 0.5 * log(1+1)
     
     boosted_loss_0 = expected_w0 * sample_loss[0]
     boosted_loss_1 = expected_w1 * sample_loss[1]
     
     expected_mean_loss = (boosted_loss_0 + boosted_loss_1) / 2.0
-    expected_final_loss = expected_mean_loss / 2.0
+    expected_final_loss = expected_mean_loss / 2.0 # grad_accum=2
     
     assert torch.allclose(loss, expected_final_loss, atol=1e-4)

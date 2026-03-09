@@ -39,9 +39,17 @@ def no_struct_fix():
 
 def test_tokenizer_chainbreak_token(tokenizer: MimirTokenizer):
     """Test 1: Chainbreak token registration + explicit amino acid collision check"""
-    assert tokenizer.seq_chainbreak is not None
-    assert tokenizer.struct_chainbreak is not None
-    assert tokenizer.sasa_chainbreak is not None
+    # Spec: SEQUENCE_CHAINBREAK = 31
+    assert tokenizer.seq_chainbreak == 31
+    # Spec: STRUCTURE_CHAINBREAK = 4100
+    assert tokenizer.struct_chainbreak == 4100
+    # Spec: SASA_PAD = 0 (used for chainbreak too)
+    assert tokenizer.sasa_chainbreak == 0
+    
+    # Spec: STRUCTURE_MASK = 4096
+    assert tokenizer.struct_mask == 4096
+    # Spec: Undefined structure (nan coords) = 2246
+    assert tokenizer.struct_nan == 2246
     
     # Assert no collision with BOS, EOS, mask, or pad token IDs
     specials = {tokenizer.seq_bos, tokenizer.seq_eos, tokenizer.seq_pad, tokenizer.seq_mask}
