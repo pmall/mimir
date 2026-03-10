@@ -132,7 +132,7 @@ def test_binder_without_structure(tokenizer, no_struct_fix):
 def test_inference_mode_fully_masked(tokenizer, struct_fix):
     """Test 4: Inference mode: fully masked binder"""
     fp = struct_fix["fingerprint"]
-    seq, struct, sasa, attn, chain_id, coords = build_input_tensors(fp, None, tokenizer)
+    seq, struct, sasa, sequence_id, chain_id, coords = build_input_tensors(fp, None, tokenizer)
     
     fp_len = len(fp["sequence"])
     bin_len = 96  # Default we used in the function for None
@@ -149,7 +149,7 @@ def test_inference_mode_fully_masked(tokenizer, struct_fix):
 def test_padding_applied_after_eos(tokenizer, struct_fix):
     """Test 5: Padding is applied after EOS"""
     fp, binder = struct_fix["fingerprint"], struct_fix["binder"]
-    seq, struct, sasa, attn, chain_id, coords = build_input_tensors(fp, binder, tokenizer)
+    seq, struct, sasa, sequence_id, chain_id, coords = build_input_tensors(fp, binder, tokenizer)
     
     L = len(seq)
     
@@ -158,7 +158,7 @@ def test_padding_applied_after_eos(tokenizer, struct_fix):
         "sequence": seq,
         "structure": struct,
         "sasa": sasa,
-        "attention_mask": attn,
+        "sequence_id": sequence_id,
         "chain_id": chain_id,
         "structure_coords": coords,
         "length": L
@@ -178,10 +178,10 @@ def test_padding_applied_after_eos(tokenizer, struct_fix):
     assert seq_padded[L] == tokenizer.seq_pad
     assert struct_padded[L] == tokenizer.struct_pad
     
-    # Attention mask
-    attn_padded = batch["attention_mask"][0]
-    assert torch.all(attn_padded[:L] == 1)
-    assert torch.all(attn_padded[L:] == 0)
+    # Sequence ID
+    sequence_id_padded = batch["sequence_id"][0]
+    assert torch.all(sequence_id_padded[:L] == 1)
+    assert torch.all(sequence_id_padded[L:] == 0)
     
     # Chain ID padded with 0
     chain_id_padded = batch["chain_id"][0]
@@ -201,7 +201,7 @@ def test_maximum_length_sample_does_not_overflow(tokenizer, struct_fix):
     binder["structure_tokens"] = [1] * 96
     binder["sasa"] = [0.5] * 96
     
-    seq, struct, sasa, attn, chain_id, coords = build_input_tensors(fp, binder, tokenizer)
+    seq, struct, sasa, sequence_id, chain_id, coords = build_input_tensors(fp, binder, tokenizer)
     
     assert len(seq) == 379
 
@@ -223,7 +223,7 @@ def test_dataset_loads_correctly(tokenizer):
     assert "sequence" in sample
     assert "structure" in sample
     assert "sasa" in sample
-    assert "attention_mask" in sample
+    assert "sequence_id" in sample
     assert "chain_id" in sample
     assert "structure_coords" in sample
     assert "length" in sample
@@ -237,14 +237,14 @@ def test_dataset_loads_correctly(tokenizer):
 def test_collate_handles_chain_id_and_coords(tokenizer, struct_fix):
     """Test 8: Collate function handles chain_id and structure_coords correctly"""
     fp, binder = struct_fix["fingerprint"], struct_fix["binder"]
-    seq, struct, sasa, attn, chain_id, coords = build_input_tensors(fp, binder, tokenizer)
+    seq, struct, sasa, sequence_id, chain_id, coords = build_input_tensors(fp, binder, tokenizer)
     
     L = len(seq)
     item = {
         "sequence": seq,
         "structure": struct,
         "sasa": sasa,
-        "attention_mask": attn,
+        "sequence_id": sequence_id,
         "chain_id": chain_id,
         "structure_coords": coords,
         "length": L

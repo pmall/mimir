@@ -107,7 +107,7 @@ class MimirDataset(Dataset):
         fp_obj = msgpack.unpackb(fp_data, raw=False)
         bin_obj = msgpack.unpackb(bin_data, raw=False)
         
-        seq, struct, sasa, attn_mask, chain_id, structure_coords = build_input_tensors(
+        seq, struct, sasa, sequence_id, chain_id, structure_coords = build_input_tensors(
             fingerprint=fp_obj,
             binder=bin_obj,
             tokenizer=self.tokenizer
@@ -117,7 +117,7 @@ class MimirDataset(Dataset):
             "sequence": seq,
             "structure": struct,
             "sasa": sasa,
-            "attention_mask": attn_mask,
+            "sequence_id": sequence_id,
             "chain_id": chain_id,
             "structure_coords": structure_coords,
             "length": len(seq)
@@ -137,7 +137,7 @@ def mimir_collate_fn(batch: List[Optional[Dict[str, torch.Tensor]]], tokenizer: 
             "sequence": torch.empty((0, 0), dtype=torch.long),
             "structure": torch.empty((0, 0), dtype=torch.long),
             "sasa": torch.empty((0, 0), dtype=torch.long),
-            "attention_mask": torch.empty((0, 0), dtype=torch.long),
+            "sequence_id": torch.empty((0, 0), dtype=torch.long),
             "chain_id": torch.empty((0, 0), dtype=torch.long),
             "structure_coords": torch.empty((0, 0, 3, 3), dtype=torch.float32),
             "num_skipped": torch.tensor(num_skipped),
@@ -164,7 +164,7 @@ def mimir_collate_fn(batch: List[Optional[Dict[str, torch.Tensor]]], tokenizer: 
         seq_padded[i, :seq_len] = item["sequence"]
         struct_padded[i, :seq_len] = item["structure"]
         sasa_padded[i, :seq_len] = item["sasa"]
-        attn_padded[i, :seq_len] = item["attention_mask"]
+        attn_padded[i, :seq_len] = item["sequence_id"]
         chain_id_padded[i, :seq_len] = item["chain_id"]
         coords_padded[i, :seq_len] = item["structure_coords"]
         
@@ -172,7 +172,7 @@ def mimir_collate_fn(batch: List[Optional[Dict[str, torch.Tensor]]], tokenizer: 
         "sequence": seq_padded,
         "structure": struct_padded,
         "sasa": sasa_padded,
-        "attention_mask": attn_padded,
+        "sequence_id": attn_padded,
         "chain_id": chain_id_padded,
         "structure_coords": coords_padded,
         "num_skipped": torch.tensor(num_skipped),

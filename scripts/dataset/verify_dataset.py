@@ -71,7 +71,7 @@ def verify_dataloader(name: str, csv_path: Path, fp_lmdb: Path, binders_lmdb: Pa
             sasa = batch["sasa"]
             chain_id = batch["chain_id"]
             coords = batch["structure_coords"]
-            attn = batch["attention_mask"]
+            attn = batch["sequence_id"]
             skipped = int(batch["num_skipped"].item())
             
             valid_batch_size = seq.shape[0]

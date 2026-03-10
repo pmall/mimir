@@ -111,7 +111,7 @@ def test_bucket_batching_less_padding_than_random(tokenizer, dataset):
     for batch_indices in bucket_batches:
         items = [dataset[i] for i in batch_indices]
         batch = mimir_collate_fn(items, tokenizer)
-        L = batch["attention_mask"].sum(dim=1)
+        L = batch["sequence_id"].sum(dim=1)
         pad = batch["sequence"].shape[1] * len(L) - L.sum().item()
         bucket_pad_tokens += pad
         
@@ -127,7 +127,7 @@ def test_bucket_batching_less_padding_than_random(tokenizer, dataset):
     for batch_indices in random_batches:
         items = [dataset[i] for i in batch_indices]
         batch = mimir_collate_fn(items, tokenizer)
-        L = batch["attention_mask"].sum(dim=1)
+        L = batch["sequence_id"].sum(dim=1)
         pad = batch["sequence"].shape[1] * len(L) - L.sum().item()
         random_pad_tokens += pad
         

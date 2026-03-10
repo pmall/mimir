@@ -64,7 +64,7 @@ def build_input_tensors(
         binder_len: Length of the generated binder. Used in inference mode when binder is None.
     
     Returns:
-        (seq_tokens, struct_tokens, sasa_tokens, attention_mask, chain_id, structure_coords)
+        (seq_tokens, struct_tokens, sasa_tokens, sequence_id, chain_id, structure_coords)
     """
     # 1. Fingerprint Processing
     # Sequence mapping
@@ -157,7 +157,7 @@ def build_input_tensors(
     # Fill in fingerprint coordinates at positions 1 to fp_len
     structure_coords[1:1 + fp_len] = fp_coords
     
-    # Attention mask (1s for all real tokens before arbitrary batch padding)
-    attention_mask = torch.ones(len(seq_track), dtype=torch.long)
+    # Sequence ID (1s for all real tokens before arbitrary batch padding)
+    sequence_id = torch.ones(len(seq_track), dtype=torch.long)
     
-    return seq_track, struct_track, sasa_track, attention_mask, chain_id, structure_coords
+    return seq_track, struct_track, sasa_track, sequence_id, chain_id, structure_coords
