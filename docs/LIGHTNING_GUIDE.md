@@ -11,25 +11,16 @@ Studios come with `uv` and `git` pre-installed. Run these in the Studio terminal
 git clone https://github.com/pmall/mimir.git
 cd mimir
 
-# Install dependencies (Editable mode)
-pip install -e .
+# Sync dependencies (Strict uv environment)
+uv sync
 ```
 
-## 2. Upload Dataset
+## 2. Prepare Dataset
 
-You need to provide a dataset of peptide sequences and their target proteins.
+Mimir v2 requires a unified structured dataset with pre-processed LMDBs and a centralized `config.json`.
 
-1.  **Format**: A CSV file with two columns: `sequence` and `target`.
-    ```csv
-    sequence,target
-    MKTIIALSYIFCLVF,ProteinA
-    ACDEFGHIKLMNPQR,ProteinB
-    ...
-    ```
-2.  **Upload**: Drag and drop your `.csv` file into the `data/` folder in the file explorer sidebar.
-
-    > [!NOTE]
-    > If you don't have a dataset, you can use the default `data/mapping_dataset.csv`.
+1. Upload your dataloader directory (e.g., `data/run78-v2/`) into the `data/` folder in the file explorer sidebar.
+2. This directory must contain your `config.json`, the fingerprints LMDB, and binders LMDB.
 
 ## 3. Model & Auth
 
@@ -37,54 +28,51 @@ You must authorize with Hugging Face to download the ESM-3 weights.
 
 ```bash
 huggingface-cli login
-python scripts/download_weights.py
+uv run scripts/download_weights.py
 ```
 
-## 4. High-Performance Training
+## 4. VRAM Crash Testing
 
-Use the following command for an **H100 (80GB)** or **A100 (80GB)**. This uses a large batch size and BF16 for maximum speed.
+Before kicking off a long training run, test your hardware limits on your exact dataset to find the maximum VRAM-safe batch size:
 
 ```bash
-# Fix segment fragmentation (set both to ensure compatibility)
-export PYTHONUNBUFFERED=1
-export PYTORCH_ALLOC_CONF=expandable_segments:True
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+uv run python -m scripts.train_crash_test --batch-size 128 --accum 1
+```
 
+_Tip: Lower the `--batch-size` until it completes a simulated training step without throwing a CUDA Out Of Memory error. Use the maximum successful value in the next step._
+
+## 5. High-Performance Training
+
+Use the following command for an **H100 (80GB)** or **A100 (80GB)**. The script automatically applies PyTorch memory fragmentation fixes (`expandable_segments`) under the hood to prevent long-run OOMs.
+
+```bash
 # Run Training
-uv run scripts/train.py \
-  --dataset data/mapping_dataset.csv \
-  --batch_size 16 \
-  --gradient_accumulation_steps 4 \
-  --use_8bit_adam \
-  --epochs 100 \
-  --lr 1e-4 2>&1 | tee >(grep --line-buffered -v "it/s" > training_log.txt)
+uv run python -m scripts.train \
+  --config data/run78-v2/config.json \
+  --checkpoint-dir runs/run2 \
+  --epochs 500 \
+  --batch-size <YOUR_MAX_BATCH> \
+  --gradient-accumulation-steps <CALCULATED_ACCUM> \
+  --lam 0.25 \
+  --use-8bit-adam \
+  --peak-lr 1e-4
 ```
 
 **Total Time Estimation**:
 
-- H100: ~6-8 hours for 100 epochs.
+- H100: ~6-8 hours for 100 epochs (Adjust accordingly for 500 epochs).
 - A100 (80GB): ~13-16 hours for 100 epochs.
-
-## 5. Manual Snapshots (Optional)
-
-Since the script only saves the `best_model` and `last_model`, you might want to manually save a specific epoch (e.g., Epoch 10) while training continues.
-
-1.  Open a **new terminal** in the Studio.
-2.  Copy the current state to a new folder and zip it:
-
-    ```bash
-    # Example: Save current state as epoch_10
-    cp -r checkpoints/last_model checkpoints/epoch_10
-    zip -r mimir_epoch_10.zip checkpoints/epoch_10
-    ```
 
 ## 6. Download Results
 
-Once training finishes, the best model is saved in `checkpoints/best_model`.
+Mimir defaults to saving a checkpoint every epoch. You will download the entire run directory containing all checkpoints and the `training_log.jsonl` so that offline validation can be executed later to select the best model.
 
-```bash
-# Zip for downloading
-zip -r mimir_best_model.zip checkpoints/best_model
-```
+1.  Open a **new terminal** in the Studio.
+2.  Zip the entire run folder:
 
-_Right-click `mimir_best_model.zip` in the VS Code sidebar and select **Download**._
+    ```bash
+    # Zip for downloading
+    zip -r mimir_run2.zip runs/run2/
+    ```
+
+_Right-click `mimir_run2.zip` in the VS Code sidebar and select **Download**._

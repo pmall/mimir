@@ -18,6 +18,12 @@ import math
 from pathlib import Path
 from typing import Any
 
+# Fix segment fragmentation to avoid OOMs on long runs
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+# Ensure stdout is not buffered so we easily see logs in real-time
+os.environ["PYTHONUNBUFFERED"] = "1"
+
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm

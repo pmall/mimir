@@ -13,6 +13,13 @@ import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import os
+# Fix segment fragmentation to avoid OOMs on long runs
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+# Ensure stdout is not buffered so we easily see logs in real-time
+os.environ["PYTHONUNBUFFERED"] = "1"
+
 import torch
 from torch.utils.data import Dataset
 
