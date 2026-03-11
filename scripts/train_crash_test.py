@@ -1,35 +1,31 @@
 """
 Crash test for MÍMIR v2 training — VRAM stress test.
 
-Generates the largest possible batch of synthetic max-length tensors and
-runs it through the REAL training loop to test production VRAM limits.
-
-This script uses direct monkeypatching (not unittest.mock.patch) to swap
-the dataset class with a synthetic one. No fragile string-based attribute
-lookups that break when imports change.
+Standalone script that loads the real model, creates synthetic data,
+and runs a full forward/backward/optimizer loop. No monkeypatching,
+no imports from train.py, no module tricks.
 
 Usage:
-    uv run python -m scripts.train_crash_test --batch-size 128 --accum 1
-
-    Lower --batch-size until the test passes without OOM.
-    Use that value in your production training command.
+    uv run python -m scripts.train_crash_test --batch-size 8 --accum 16
+    uv run python -m scripts.train_crash_test --batch-size 4 --accum 32 --no-compile
 """
 
 # ---------------------------------------------------------------------------
 # Stdlib imports
 # ---------------------------------------------------------------------------
 import argparse
+import functools
 import logging
+import math
+import os
+import random
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
 # Environment — must be set BEFORE importing torch
 # ---------------------------------------------------------------------------
-import os
-
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTHONUNBUFFERED"] = "1"
@@ -38,14 +34,19 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 # Third-party imports
 # ---------------------------------------------------------------------------
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+
+try:
+    import bitsandbytes as bnb
+    HAS_BNB = True
+except ImportError:
+    HAS_BNB = False
 
 # ---------------------------------------------------------------------------
-# Local imports — we import the REAL training module to exercise the actual
-# code path. The crash test's value is that it runs the same forward/backward
-# pass as production, just with synthetic data.
+# Local imports — model and tokenizer only, NOT train.py
 # ---------------------------------------------------------------------------
-import scripts.train as train
+from mimir.model import load_model
 from mimir.tokenizer import load_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -54,52 +55,38 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# Maximum sequence length in the dataset:
+# Maximum sequence length:
 # 1 (BOS) + 280 (max fingerprint) + 1 (CUT) + 96 (max binder) + 1 (EOS) = 379
 MAX_LEN = 379
-
-# Enough synthetic samples to fill multiple batches
+PADDED_LEN = 384  # nearest multiple of 64
 NUM_SAMPLES = 1000
 
 
 # ---------------------------------------------------------------------------
-# Synthetic Dataset — drop-in replacement for MimirDataset
+# Synthetic Dataset
 # ---------------------------------------------------------------------------
 
 
 class SyntheticDataset(Dataset):
-    """Generates synthetic max-length tensors for VRAM stress testing.
+    """Generates synthetic tensors matching the real MimirDataset output format."""
 
-    This class has the same interface as MimirDataset:
-    - .samples list (needed by BucketBatchSampler for length counting)
-    - .fingerprints_lmdb / .binders_lmdb (needed by BucketBatchSampler)
-    - __getitem__ returns the same dict structure as MimirDataset
-
-    The synthetic data has correct special token placement so the masking
-    logic in train.py works correctly (BOS at 0, chainbreak at 281, EOS at end).
-    """
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self.tokenizer = load_tokenizer()
-        self.samples = [{"target": "T", "binder": "B"}] * NUM_SAMPLES
-        # BucketBatchSampler accesses these paths
-        self.fingerprints_lmdb = Path("/dev/null")
-        self.binders_lmdb = Path("/dev/null")
+    def __init__(self, tokenizer: Any) -> None:
+        self.tokenizer = tokenizer
 
     def __len__(self) -> int:
         return NUM_SAMPLES
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        """Build synthetic tensors mimicking build_input_tensors output."""
         seq = torch.randint(0, 30, (MAX_LEN,), dtype=torch.long)
 
-        # Place special tokens where the masking logic expects them:
-        # Position 0: BOS
-        # Position 281: chainbreak (after 280 fingerprint tokens + BOS)
-        # Position -1: EOS
+        # Place special tokens exactly where masking expects them
         seq[0] = self.tokenizer.seq_bos
         seq[281] = self.tokenizer.seq_chainbreak
         seq[-1] = self.tokenizer.seq_eos
+
+        # Structure coords: fingerprint has real coords, rest is NaN (matches real data)
+        coords = torch.full((MAX_LEN, 3, 3), float('nan'), dtype=torch.float32)
+        coords[1:281] = torch.randn((280, 3, 3), dtype=torch.float32)
 
         return {
             "sequence": seq,
@@ -107,14 +94,95 @@ class SyntheticDataset(Dataset):
             "sasa": torch.randint(0, 15, (MAX_LEN,), dtype=torch.long),
             "sequence_id": torch.ones((MAX_LEN,), dtype=torch.long),
             "chain_id": torch.cat([
-                # Chain 1: BOS + fingerprint + chainbreak = 282 tokens
                 torch.ones(282, dtype=torch.long),
-                # Chain 2: binder + EOS = remaining tokens
                 torch.full((MAX_LEN - 282,), 2, dtype=torch.long),
             ]),
-            "structure_coords": torch.randn((MAX_LEN, 3, 3), dtype=torch.float32),
-            "length": MAX_LEN,
+            "structure_coords": coords,
         }
+
+
+def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Stacks and pads batch tensors to PADDED_LEN."""
+    batch_size = len(batch)
+    tokenizer = load_tokenizer()
+
+    seq = torch.full((batch_size, PADDED_LEN), tokenizer.seq_pad, dtype=torch.long)
+    struct = torch.full((batch_size, PADDED_LEN), tokenizer.struct_pad, dtype=torch.long)
+    sasa = torch.full((batch_size, PADDED_LEN), tokenizer.sasa_pad, dtype=torch.long)
+    seq_id = torch.zeros((batch_size, PADDED_LEN), dtype=torch.long)
+    chain = torch.zeros((batch_size, PADDED_LEN), dtype=torch.long)
+    coords = torch.full((batch_size, PADDED_LEN, 3, 3), float('nan'), dtype=torch.float32)
+
+    for i, item in enumerate(batch):
+        L = item["sequence"].size(0)
+        seq[i, :L] = item["sequence"]
+        struct[i, :L] = item["structure"]
+        sasa[i, :L] = item["sasa"]
+        seq_id[i, :L] = item["sequence_id"]
+        chain[i, :L] = item["chain_id"]
+        coords[i, :L] = item["structure_coords"]
+
+    return {
+        "sequence": seq,
+        "structure": struct,
+        "sasa": sasa,
+        "sequence_id": seq_id,
+        "chain_id": chain,
+        "structure_coords": coords,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Masking (copied from train.py — no imports needed)
+# ---------------------------------------------------------------------------
+
+
+def apply_masking(batch: dict, tokenizer: Any) -> tuple[dict, torch.Tensor, torch.Tensor]:
+    """Masks the binder region with independent sequence/structure rates."""
+    seq = batch["sequence"].clone()
+    struct = batch["structure"].clone()
+    labels_seq = torch.full_like(seq, -100)
+    labels_struct = torch.full_like(struct, -100)
+
+    for i in range(seq.size(0)):
+        cut_pos_t = (seq[i] == tokenizer.seq_chainbreak).nonzero(as_tuple=True)[0]
+        if len(cut_pos_t) == 0:
+            continue
+        cut_pos = cut_pos_t[0].item()
+
+        eos_pos_t = (seq[i] == tokenizer.seq_eos).nonzero(as_tuple=True)[0]
+        eos_pos = eos_pos_t[0].item() if len(eos_pos_t) > 0 else seq.size(1)
+
+        binder_start = cut_pos + 1
+        binder_end = eos_pos
+        binder_len = binder_end - binder_start
+        if binder_len <= 0:
+            continue
+
+        # Sequence masking
+        rate = random.uniform(0.25, 0.75)
+        n_mask = max(1, int(round(binder_len * rate)))
+        indices = random.sample(range(binder_start, binder_end), n_mask)
+        for idx in indices:
+            labels_seq[i, idx] = seq[i, idx].item()
+            seq[i, idx] = tokenizer.seq_mask
+
+        # Structure masking (Case A only)
+        struct_binder = struct[i, binder_start:binder_end]
+        if not torch.all(struct_binder == tokenizer.struct_mask):
+            rate_s = random.uniform(0.25, 0.75)
+            n_mask_s = max(1, int(round(binder_len * rate_s)))
+            indices_s = random.sample(range(binder_start, binder_end), n_mask_s)
+            for idx in indices_s:
+                labels_struct[i, idx] = struct[i, idx].item()
+                struct[i, idx] = tokenizer.struct_mask
+
+    masked = {
+        "sequence": seq, "structure": struct, "sasa": batch["sasa"],
+        "chain_id": batch["chain_id"], "structure_coords": batch["structure_coords"],
+        "sequence_id": batch["sequence_id"],
+    }
+    return masked, labels_seq, labels_struct
 
 
 # ---------------------------------------------------------------------------
@@ -123,85 +191,152 @@ class SyntheticDataset(Dataset):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Mimir v2 VRAM Crash Test")
-    parser.add_argument("--batch-size", type=int, default=128, help="Batch size to test")
-    parser.add_argument("--accum", type=int, default=1, help="Gradient accumulation steps")
+    parser = argparse.ArgumentParser(description="MÍMIR v2 VRAM Crash Test")
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--accum", type=int, default=1)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--no-compile", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(
-        stream=sys.stdout,
-        level=logging.INFO,
+        stream=sys.stdout, level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
 
     logger.info("=== MÍMIR v2 VRAM Crash Test ===")
     logger.info(f"Batch size: {args.batch_size}, Accumulation: {args.accum}")
-    logger.info(f"Max sequence length: {MAX_LEN}")
+    logger.info(f"Max sequence length: {MAX_LEN} (padded to {PADDED_LEN})")
 
-    # Use a temporary directory for checkpoints — auto-cleaned on exit
-    with tempfile.TemporaryDirectory(prefix="mimir_crash_") as tmpdir:
-        # Build the same argparse.Namespace that train._run() expects.
-        # checkpoint_every=9999 means no epoch checkpoints are saved,
-        # so we don't need to mock the save functions.
-        train_args = argparse.Namespace(
-            config=Path("dummy_config.json"),
-            checkpoint_dir=tmpdir,
-            epochs=1,
-            batch_size=args.batch_size,
-            peak_lr=1e-4,
-            lam=1.0,
-            checkpoint_every=9999,
-            gradient_accumulation_steps=args.accum,
-            use_8bit_adam=True,
-            num_workers=0,      # No multiprocessing for crash test
-            seed=42,
-            verbose=True,
-            no_compile=False,   # Still compile — we want to test the real path
-            associations_csv="dummy.csv",
-            fingerprints_lmdb="dummy_fp",
-            binders_lmdb="dummy_bin",
-        )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Device: {device}")
 
-        # --- Monkeypatch ---
-        # Direct attribute swap is bulletproof: no string-based lookups,
-        # no unittest.mock, no risk of "attribute not found" errors.
-        # We restore originals in the finally block.
-        original_dataset_cls = train.MimirDataset
-        original_scan_lengths = train.BucketBatchSampler._scan_lengths
+    # --- GPU optimizations (same as train.py) ---
+    if torch.cuda.is_available():
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        logger.info("Flash Attention / SDPA enabled (with math fallback).")
 
-        train.MimirDataset = SyntheticDataset
-        train.BucketBatchSampler._scan_lengths = lambda self: [MAX_LEN] * NUM_SAMPLES
+    # --- Model ---
+    logger.info("Loading model...")
+    model = load_model()
+    model.to(device)
+    model.train()
 
-        logger.info("Running full training epoch with synthetic data...")
-        try:
-            train._run(train_args)
-            logger.info("Crash test PASSED — no OOM.")
+    if not args.no_compile and torch.cuda.is_available():
+        logger.info("Compiling model with torch.compile(dynamic=True)...")
+        model = torch.compile(model, dynamic=True)
+    else:
+        logger.info("Skipping torch.compile.")
 
-        except Exception as e:
-            if "out of memory" in str(e).lower():
-                logger.error("!!! CRASH TEST FAILED: OUT OF MEMORY !!!")
-                logger.error(f"Reduce --batch-size below {args.batch_size} and retry.")
-            else:
-                logger.error(f"Unexpected error: {e}")
-                import traceback
-                traceback.print_exc()
-            sys.exit(1)
+    # --- Optimizer ---
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    if HAS_BNB:
+        optimizer = bnb.optim.AdamW8bit(trainable, lr=1e-4)
+    else:
+        optimizer = torch.optim.AdamW(trainable, lr=1e-4)
 
-        finally:
-            # Always restore originals to avoid polluting other imports
-            train.MimirDataset = original_dataset_cls
-            train.BucketBatchSampler._scan_lengths = original_scan_lengths
+    # --- Data ---
+    tokenizer = load_tokenizer()
+    dataset = SyntheticDataset(tokenizer)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        collate_fn=collate_fn,
+        num_workers=args.num_workers,
+        multiprocessing_context="spawn" if args.num_workers > 0 else None,
+        pin_memory=torch.cuda.is_available(),
+    )
 
-            # --- VRAM Report ---
-            if torch.cuda.is_available():
-                max_mem = torch.cuda.max_memory_allocated() / (1024**3)
-                total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                logger.info("--- VRAM REPORT ---")
-                logger.info(f"Peak VRAM: {max_mem:.2f} GB / {total_mem:.2f} GB")
-                logger.info(f"Utilization: {(max_mem / total_mem) * 100:.1f}%")
-                logger.info("-------------------")
-            else:
-                logger.warning("No CUDA — VRAM report skipped.")
+    # --- Autocast dtype ---
+    if torch.cuda.is_available():
+        cap = torch.cuda.get_device_capability()
+        autocast_dtype = torch.bfloat16 if cap[0] >= 8 else torch.float16
+        autocast_device = "cuda"
+    else:
+        autocast_dtype = torch.bfloat16
+        autocast_device = "cpu"
+    logger.info(f"Autocast: {autocast_device}, {autocast_dtype}")
+
+    # --- Loss function ---
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
+
+    # --- Training loop ---
+    logger.info(f"Running {len(dataloader)} batches (accum={args.accum})...")
+    optimizer.zero_grad()
+    num_batches = 0
+
+    try:
+        pbar = tqdm(dataloader, desc="Crash Test")
+        for step, batch in enumerate(pbar):
+            masked, labels_seq, labels_struct = apply_masking(batch, tokenizer)
+
+            tokens = {k: v.to(device) for k, v in masked.items()}
+            labels_seq = labels_seq.to(device)
+            labels_struct = labels_struct.to(device)
+
+            with torch.amp.autocast(autocast_device, dtype=autocast_dtype):
+                output = model(
+                    sequence_tokens=tokens["sequence"],
+                    structure_tokens=tokens["structure"],
+                    sasa_tokens=tokens["sasa"],
+                    chain_id=tokens["chain_id"],
+                    structure_coords=tokens["structure_coords"],
+                    sequence_id=tokens["sequence_id"],
+                )
+
+                loss_seq = criterion(
+                    output.sequence_logits.float().view(-1, output.sequence_logits.size(-1)),
+                    labels_seq.view(-1),
+                ).view(labels_seq.size())
+
+                loss_struct = criterion(
+                    output.structure_logits.float().view(-1, output.structure_logits.size(-1)),
+                    labels_struct.view(-1),
+                ).view(labels_struct.size())
+
+                mask_seq = labels_seq != -100
+                mask_struct = (labels_struct != -100) & (labels_struct != tokenizer.struct_nan)
+                total_masked = mask_seq.sum() + mask_struct.sum()
+
+                if total_masked > 0:
+                    loss = ((loss_seq * mask_seq.float()).sum() + (loss_struct * mask_struct.float()).sum()) / total_masked.float()
+                else:
+                    loss = torch.tensor(0.0, device=device, requires_grad=True)
+
+                loss = loss / args.accum
+
+            # Backward
+            loss.backward()
+
+            num_batches += 1
+            if num_batches % args.accum == 0:
+                torch.nn.utils.clip_grad_norm_(trainable, max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+
+            pbar.set_postfix(Loss=f"{loss.item() * args.accum:.4f}")
+
+        logger.info("Crash test PASSED — no OOM.")
+
+    except Exception as e:
+        if "out of memory" in str(e).lower():
+            logger.error("!!! CRASH TEST FAILED: OUT OF MEMORY !!!")
+            logger.error(f"Reduce --batch-size below {args.batch_size} and retry.")
+        else:
+            logger.error(f"Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
+    finally:
+        if torch.cuda.is_available():
+            peak = torch.cuda.max_memory_allocated() / (1024**3)
+            total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            logger.info("--- VRAM REPORT ---")
+            logger.info(f"Peak VRAM: {peak:.2f} GB / {total:.2f} GB")
+            logger.info(f"Utilization: {(peak / total) * 100:.1f}%")
+            logger.info("-------------------")
 
 
 if __name__ == "__main__":

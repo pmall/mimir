@@ -50,14 +50,20 @@ def _enable_gradient_checkpointing(model: nn.Module) -> None:
     logger.warning("No TransformerStack found — gradient checkpointing not applied")
 
 
+def _checkpointed_forward(self, *args, **kwargs):
+    """Module-level wrapper so Dynamo only compiles this function once."""
+    return torch_checkpoint(self._original_forward, *args, use_reentrant=False, **kwargs)
+
+
 def _wrap_block_with_checkpoint(block: nn.Module) -> None:
-    """Wraps a single transformer block's forward with gradient checkpointing."""
-    original_forward = block.forward
-
-    def checkpointed_forward(*args, **kwargs):
-        return torch_checkpoint(original_forward, *args, use_reentrant=False, **kwargs)
-
-    block.forward = checkpointed_forward
+    """Wraps a single transformer block's forward with gradient checkpointing.
+    
+    Uses types.MethodType instead of a closure so that torch.compile (Dynamo)
+    doesn't see 48 different function signatures and hit the recompilation limit.
+    """
+    import types
+    block._original_forward = block.forward
+    block.forward = types.MethodType(_checkpointed_forward, block)
 
 
 # --- Model Loading ---

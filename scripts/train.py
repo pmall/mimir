@@ -688,10 +688,12 @@ def _run(args: argparse.Namespace) -> None:
     # --- GPU-specific optimizations ---
     if torch.cuda.is_available():
         # Prefer Flash Attention / memory-efficient SDPA over the slow math path.
+        # MUST leave enable_math_sdp=True because Flash Attention rejects certain
+        # padded sequence lengths and mask patterns, requiring the math fallback.
         torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_math_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
         torch.backends.cuda.enable_mem_efficient_sdp(True)
-        logger.info("Flash Attention 2 / SDPA enabled.")
+        logger.info("Flash Attention 2 / SDPA enabled (with math fallback).")
 
     # --- Data ---
     logger.info("Loading tokenizer and configuring dataloader...")
@@ -747,7 +749,10 @@ def _run(args: argparse.Namespace) -> None:
     # or for GPUs where compilation is too slow (e.g. Colab T4).
     if not args.no_compile and torch.cuda.is_available():
         logger.info("Compiling model with torch.compile (this may take a few minutes)...")
-        model = torch.compile(model)
+        # dynamic=True prevents Dynamo from recompiling the graph for every bucket 
+        # (different sequence lengths). Without it, multiple graphs are cached in 
+        # VRAM, triggering OOM.
+        model = torch.compile(model, dynamic=True)
     else:
         logger.info("Skipping torch.compile (--no-compile or CPU mode).")
 
