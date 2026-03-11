@@ -103,8 +103,8 @@ def main():
     )
 
     with patch("scripts.train.MimirDataset", SyntheticDataset), \
-         patch("scripts.train.Path.mkdir"), \
-         patch("scripts.train.open", MagicMock()), \
+         patch("scripts.train._save_epoch_checkpoint"), \
+         patch("scripts.train._save_model_checkpoint"), \
          patch("mimir.dataset.lmdb.open"):
         
         with patch.object(train.BucketBatchSampler, "_scan_lengths", return_value=[MAX_LEN]*NUM_SAMPLES):
