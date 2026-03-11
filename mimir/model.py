@@ -5,8 +5,11 @@ Model definitions and loading utilities for Mimir v2.
 import logging
 from typing import Optional
 
+import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from esm.models.esm3 import ESM3
+from esm.layers.transformer_stack import TransformerStack
 from peft import PeftModel, get_peft_model, LoraConfig
 
 logger = logging.getLogger(__name__)
@@ -22,6 +25,42 @@ LORA_CONFIG = LoraConfig(
     bias="none",
     task_type=None,
 )
+
+
+# --- Gradient Checkpointing ---
+
+
+def _enable_gradient_checkpointing(model: nn.Module) -> None:
+    """Enables gradient checkpointing on ESM3's TransformerStack blocks.
+
+    ESM3 does not inherit from HuggingFace PreTrainedModel, so we wrap
+    each block's forward with torch.utils.checkpoint individually.
+    This trades ~30% extra compute for significant VRAM savings.
+    """
+    for module in model.modules():
+        if isinstance(module, TransformerStack):
+            for block in module.blocks:
+                _wrap_block_with_checkpoint(block)
+            logger.info(
+                f"Gradient checkpointing enabled on TransformerStack "
+                f"({len(module.blocks)} blocks)"
+            )
+            return
+
+    logger.warning("No TransformerStack found — gradient checkpointing not applied")
+
+
+def _wrap_block_with_checkpoint(block: nn.Module) -> None:
+    """Wraps a single transformer block's forward with gradient checkpointing."""
+    original_forward = block.forward
+
+    def checkpointed_forward(*args, **kwargs):
+        return torch_checkpoint(original_forward, *args, use_reentrant=False, **kwargs)
+
+    block.forward = checkpointed_forward
+
+
+# --- Model Loading ---
 
 
 def load_model(checkpoint_path: Optional[str] = None) -> nn.Module:
@@ -58,10 +97,7 @@ def load_model(checkpoint_path: Optional[str] = None) -> nn.Module:
             f"({100 * trainable / total:.2f}%)"
         )
 
-    # Enable gradient checkpointing to save VRAM (may not be available on all backends)
-    try:
-        model.gradient_checkpointing_enable()
-    except AttributeError:
-        logger.warning("gradient_checkpointing_enable not available, skipping")
+    # 3. Enable gradient checkpointing to save VRAM
+    _enable_gradient_checkpointing(model)
 
     return model

@@ -27,26 +27,23 @@ Mimir v2 requires a unified structured dataset with pre-processed LMDBs and a ce
 You must authorize with Hugging Face to download the ESM-3 weights.
 
 ```bash
-huggingface-cli login
+hf auth login
 uv run scripts/download_weights.py
 ```
 
 ## 4. VRAM Crash Testing
 
-Before kicking off a long training run, test your hardware limits on your exact dataset to find the maximum VRAM-safe batch size:
+Before kicking off a long training run, test your hardware limits to find the maximum VRAM-safe batch size:
 
 ```bash
 uv run python -m scripts.train_crash_test --batch-size 128 --accum 1
 ```
 
-_Tip: Lower the `--batch-size` until it completes a simulated training step without throwing a CUDA Out Of Memory error. Use the maximum successful value in the next step._
+_Lower `--batch-size` until it completes without OOM. Use the maximum successful value in the next step._
 
-## 5. High-Performance Training
-
-Use the following command for an **H100 (80GB)** or **A100 (80GB)**. The script automatically applies PyTorch memory fragmentation fixes (`expandable_segments`) under the hood to prevent long-run OOMs.
+## 5. Training
 
 ```bash
-# Run Training
 uv run python -m scripts.train \
   --config data/run78-v2/config.json \
   --checkpoint-dir runs/run2 \
@@ -58,21 +55,18 @@ uv run python -m scripts.train \
   --peak-lr 1e-4
 ```
 
-**Total Time Estimation**:
+> **Note:** The first epoch takes longer due to `torch.compile` graph tracing. Subsequent epochs are faster.
 
-- H100: ~6-8 hours for 100 epochs (Adjust accordingly for 500 epochs).
-- A100 (80GB): ~13-16 hours for 100 epochs.
+**Estimated time** (500 epochs):
+
+- H100 80GB: ~30-40 hours
+- A100 80GB: ~65-80 hours
 
 ## 6. Download Results
 
-Mimir defaults to saving a checkpoint every epoch. You will download the entire run directory containing all checkpoints and the `training_log.jsonl` so that offline validation can be executed later to select the best model.
-
-1.  Open a **new terminal** in the Studio.
-2.  Zip the entire run folder:
-
-    ```bash
-    # Zip for downloading
-    zip -r mimir_run2.zip runs/run2/
-    ```
+```bash
+# Zip the entire run folder
+zip -r mimir_run2.zip runs/run2/
+```
 
 _Right-click `mimir_run2.zip` in the VS Code sidebar and select **Download**._
