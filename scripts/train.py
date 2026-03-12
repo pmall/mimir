@@ -875,7 +875,15 @@ def _run(args: argparse.Namespace) -> None:
             for k in m:
                 m[k] += step_metrics[k]
 
-            pbar.set_postfix({"Loss": f"{loss.item() * args.gradient_accumulation_steps:.4f}"})
+            n_masked = int(step_metrics["overall_total"])
+            raw_loss = step_metrics["overall_loss"] / max(n_masked, 1)
+            acc = step_metrics["overall_correct"] / max(n_masked, 1)
+            pbar.set_postfix({
+                "BLoss": f"{loss.item() * args.gradient_accumulation_steps:.4f}",
+                "Loss":  f"{raw_loss:.4f}",
+                "Acc":   f"{acc:.3f}",
+                "Tok":   n_masked,
+            })
 
         # Flush any remaining accumulated gradients at end of epoch
         if num_batches > 0 and num_batches % args.gradient_accumulation_steps != 0:
