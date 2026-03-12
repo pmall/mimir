@@ -823,7 +823,7 @@ def _run(args: argparse.Namespace) -> None:
                 total_skipped += skipped_in_batch
 
             # Skip entirely empty batches (all samples failed LMDB lookup)
-            if "sequence" not in batch:
+            if batch["sequence"].numel() == 0:
                 continue
 
             # --- Forward pass ---
